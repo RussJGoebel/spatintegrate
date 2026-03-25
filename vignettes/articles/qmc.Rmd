@@ -1,0 +1,552 @@
+---
+title: "Layer 1: QMC Sampling Primitives"
+description: >
+  Visual walkthrough of the two Layer 1 functions in spatintegrate:
+  generate_qmc_unit_square() and map_unit_square_to_triangle().
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Layer 1: QMC Sampling Primitives}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse   = TRUE,
+  comment    = "#>",
+  fig.width  = 7,
+  fig.height = 4,
+  dpi        = 150
+)
+library(spatintegrate)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+
+theme_article <- function() {
+  theme_minimal(base_size = 11) +
+    theme(
+      panel.border    = element_rect(fill = NA, colour = "grey60"),
+      legend.position = "none"
+    )
+}
+
+region_colours  <- c("#2166ac", "#d6604d", "#4dac26", "#8073ac")
+stratum_colours <- c(A = "#a6cee3", B = "#b2df8a")
+
+# Helper: triangulate an sfc polygon into an sfc of triangles.
+# Uses centroid filtering to discard Delaunay triangles that fall outside
+# the original polygon — necessary for non-convex shapes. This is a
+# vignette convenience; the real spatintegrate::triangulate_sf() will
+# bake this guarantee into its contract.
+triangulate_polygon <- function(poly_sfc) {
+  tris <- st_triangulate(poly_sfc) |>
+    st_collection_extract("POLYGON") |>
+    st_cast("POLYGON")
+
+  # Delaunay triangulation is unconstrained — for non-convex polygons some
+  # triangles extend outside the boundary. Filter to interior triangles only.
+  centroids <- st_centroid(tris)
+  inside    <- st_within(centroids, poly_sfc, sparse = FALSE)[, 1]
+  tris[inside]
+}
+
+# Helper: extract 3x2 coordinate matrix from a triangle sfg
+get_triangle_coords <- function(tri_sfg) {
+  coords <- st_coordinates(tri_sfg)
+  ext    <- coords[coords[, "L2"] == 1, c("X", "Y"), drop = FALSE]
+  if (nrow(ext) >= 2 && all(ext[1, ] == ext[nrow(ext), ])) {
+    ext <- ext[-nrow(ext), , drop = FALSE]
+  }
+  unname(ext)
+}
+
+# Helper: sample n_per_triangle QMC points in each triangle of an sfc,
+# returning a data frame with x, y, and triangle index.
+# This is the per-triangle loop that integrate_one_sounding() will use.
+sample_triangulation <- function(tris, n_per_triangle, min_area = 0, id = NULL) {
+  areas <- as.numeric(st_area(tris))
+  keep  <- areas > min_area
+  qmc   <- generate_qmc_unit_square(n_per_triangle)
+
+  do.call(bind_rows, lapply(seq_along(tris)[keep], function(i) {
+    pts <- map_unit_square_to_triangle(qmc, get_triangle_coords(tris[[i]]))
+    data.frame(x = pts[, 1], y = pts[, 2],
+               tri = i, id = if (is.null(id)) NA else id)
+  }))
+}
+```
+
+Layer 1 of `spatintegrate` has exactly two functions:
+
+- `generate_qmc_unit_square(n)` — generates `n` Sobol points in $[0,1]^2$
+- `map_unit_square_to_triangle(qmc_points, triangle_coords)` — maps those points into a triangle
+
+Everything else — triangulation, area weighting, basis evaluation — happens in
+higher layers. These two functions are pure math with no sf dependency.
+
+---
+
+## 1. `generate_qmc_unit_square()`
+
+A Sobol sequence in $[0,1]^2$. The key property is **low discrepancy** —
+points fill space far more evenly than random sampling, which means faster
+integration convergence for the same number of points.
+
+```{r qmc-unit-square, fig.height = 3.5}
+make_pts_df <- function(n, label) {
+  pts <- generate_qmc_unit_square(n)
+  data.frame(x = pts[, 1], y = pts[, 2], label = label)
+}
+
+set.seed(42)
+pts_all <- bind_rows(
+  make_pts_df(10,  "Sobol  n = 10"),
+  make_pts_df(64,  "Sobol  n = 64"),
+  make_pts_df(256, "Sobol  n = 256"),
+  data.frame(x = runif(256), y = runif(256), label = "Random  n = 256")
+)
+
+sq_outline <- data.frame(x = c(0, 1, 1, 0, 0), y = c(0, 0, 1, 1, 0))
+
+ggplot(pts_all, aes(x, y)) +
+  geom_path(data = sq_outline, aes(x, y), colour = "grey40", linewidth = 0.6) +
+  geom_point(size = 1.2, colour = "#2166ac") +
+  facet_wrap(~label, nrow = 1) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(
+    title    = "generate_qmc_unit_square()",
+    subtitle = "Low-discrepancy Sobol points vs uniform random",
+    x = NULL, y = NULL
+  ) +
+  theme_article()
+```
+
+Even at `n = 10` the Sobol points cover the space without clustering. Random
+sampling at `n = 256` still shows visible gaps and clumps.
+
+---
+
+## 2. `map_unit_square_to_triangle()`
+
+Points from $[0,1]^2$ are mapped into a triangle using a barycentric
+transformation. Points outside the standard simplex ($u + v > 1$) are reflected
+across the diagonal — making the mapping area-preserving and bijective.
+
+```{r map-triangle, fig.height = 4}
+qmc64 <- generate_qmc_unit_square(64)
+
+tri_coords  <- matrix(c(0, 0,  2, 0,  0.6, 1.4), ncol = 2, byrow = TRUE)
+tri_outline <- data.frame(
+  x = c(tri_coords[, 1], tri_coords[1, 1]),
+  y = c(tri_coords[, 2], tri_coords[1, 2])
+)
+
+mapped      <- map_unit_square_to_triangle(qmc64, tri_coords)
+tri_samples <- data.frame(x = mapped[, 1], y = mapped[, 2])
+
+p_tri_geom <- ggplot() +
+  geom_polygon(data = tri_outline, aes(x, y),
+               fill = "#2166ac", alpha = 0.15, colour = "black", linewidth = 0.7) +
+  labs(title = "Triangle polygon", x = NULL, y = NULL) +
+  theme_article()
+
+p_tri_samp <- ggplot() +
+  geom_polygon(data = tri_outline, aes(x, y),
+               fill = NA, colour = "black", linewidth = 0.5, linetype = "dashed") +
+  geom_point(data = tri_samples, aes(x, y),
+             size = 1.5, colour = "#2166ac", alpha = 0.8) +
+  labs(title = "QMC samples (64 points)", x = NULL, y = NULL) +
+  theme_article()
+
+grid.arrange(p_tri_geom, p_tri_samp, ncol = 2)
+```
+
+Points fill the triangle uniformly. The same `qmc64` sequence can be reused
+across multiple triangles — each independent barycentric mapping produces a
+uniform sample inside its own triangle.
+
+---
+
+## How these two functions compose
+
+In practice, `integrate_one_sounding()` (Layer 4) calls them like this:
+
+```r
+qmc   <- generate_qmc_unit_square(n_per_triangle)   # once per sounding
+
+for each triangle i in triangulation:
+  pts_i  <- map_unit_square_to_triangle(qmc, tri_coords_i)
+  phi_i  <- basis_fn(pts_i)                          # evaluated, then discarded
+  A_row  <- A_row + weight_i * colMeans(phi_i)
+```
+
+One QMC sequence, reused. One basis evaluation per triangle, immediately
+discarded. Memory stays bounded at `n_per_triangle × k` regardless of how
+many triangles the sounding has.
+
+The four use cases below show how the geometry preparation feeds into this loop.
+
+---
+
+## Use Case 1: Overlapping Quadrilaterals
+
+Satellite footprints are near-parallelogram quadrilaterals. We triangulate each
+one into two triangles and call `map_unit_square_to_triangle` on each.
+
+```{r uc1-quads, fig.height = 4}
+make_parallelogram <- function(origin, width, height, shear) {
+  x0 <- origin[1]; y0 <- origin[2]
+  matrix(c(
+    x0,                  y0,
+    x0 + width,          y0,
+    x0 + width + shear,  y0 + height,
+    x0 + shear,          y0 + height
+  ), ncol = 2, byrow = TRUE)
+}
+
+footprints <- list(
+  make_parallelogram(c(0.0, 0.0), 2, 1, 0.3),
+  make_parallelogram(c(0.5, 0.2), 2, 1, 0.3),
+  make_parallelogram(c(1.0, 0.4), 2, 1, 0.3),
+  make_parallelogram(c(0.3, 0.7), 2, 1, 0.3)
+)
+
+fp_sfc_list <- lapply(footprints, function(f) {
+  st_sfc(st_polygon(list(rbind(f, f[1, ]))))
+})
+
+fp_tri_list <- lapply(fp_sfc_list, triangulate_polygon)
+
+fp_outlines <- do.call(bind_rows, lapply(seq_along(footprints), function(i) {
+  coords <- rbind(footprints[[i]], footprints[[i]][1, ])
+  data.frame(x = coords[, 1], y = coords[, 2], id = factor(i))
+}))
+
+fp_samples <- do.call(bind_rows, lapply(seq_along(fp_tri_list), function(i) {
+  sample_triangulation(fp_tri_list[[i]], n_per_triangle = 32) |>
+    mutate(id = factor(i))
+}))
+
+p_geom <- ggplot() +
+  geom_polygon(data = fp_outlines, aes(x, y, fill = id, colour = id, group = id),
+               alpha = 0.15, linewidth = 0.7) +
+  scale_fill_manual(values   = region_colours) +
+  scale_colour_manual(values = region_colours) +
+  labs(title = "Footprint polygons", x = NULL, y = NULL) +
+  theme_article()
+
+p_samp <- ggplot() +
+  geom_polygon(data = fp_outlines, aes(x, y, colour = id, group = id),
+               fill = NA, linewidth = 0.5, linetype = "dashed") +
+  geom_point(data = fp_samples, aes(x, y, colour = id), size = 1.2, alpha = 0.8) +
+  scale_colour_manual(values = region_colours) +
+  labs(title = "QMC samples (32 per triangle)", x = NULL, y = NULL) +
+  theme_article()
+
+grid.arrange(p_geom, p_samp, ncol = 2)
+```
+
+Each parallelogram becomes two triangles. Each triangle gets 32 independent
+QMC points. The overlapping regions are resolved at the integration layer above.
+
+---
+
+## Use Case 2: Irregular Polygons
+
+Irregular polygons triangulate into more pieces, producing more triangles and
+therefore more sample points — denser sampling emerges naturally from finer
+triangulation.
+
+```{r uc2-irregular, fig.height = 4.5}
+make_blob <- function(cx, cy, n_pts = 7, seed = 1) {
+  set.seed(seed)
+  angles <- sort(runif(n_pts, 0, 2 * pi))
+  r      <- 0.5 + runif(n_pts, 0, 0.4)
+  xs     <- cx + r * cos(angles)
+  ys     <- cy + r * sin(angles)
+  st_polygon(list(cbind(c(xs, xs[1]), c(ys, ys[1]))))
+}
+
+blobs <- st_sfc(
+  make_blob(0,   0,   seed = 1),
+  make_blob(2,   0.3, seed = 5),
+  make_blob(1,   1.5, seed = 9)
+)
+
+tri_list <- lapply(blobs, function(b) triangulate_polygon(st_sfc(b)))
+
+blob_outlines <- do.call(bind_rows, lapply(seq_along(blobs), function(i) {
+  coords <- st_coordinates(blobs[i])
+  data.frame(x = coords[, "X"], y = coords[, "Y"], id = factor(i))
+}))
+
+tri_outlines <- do.call(bind_rows, lapply(seq_along(tri_list), function(i) {
+  do.call(bind_rows, lapply(seq_along(tri_list[[i]]), function(j) {
+    coords <- st_coordinates(tri_list[[i]][j])
+    data.frame(x = coords[, "X"], y = coords[, "Y"],
+               blob = factor(i), tri = j)
+  }))
+}))
+
+blob_samples <- do.call(bind_rows, lapply(seq_along(tri_list), function(i) {
+  sample_triangulation(tri_list[[i]], n_per_triangle = 16) |>
+    mutate(id = factor(i))
+}))
+
+p_blobs <- ggplot() +
+  geom_polygon(data = blob_outlines, aes(x, y, fill = id, colour = id, group = id),
+               alpha = 0.15, linewidth = 0.8) +
+  scale_fill_manual(values = region_colours) +
+  scale_colour_manual(values = region_colours) +
+  labs(title = "Irregular polygons", x = NULL, y = NULL) +
+  theme_article()
+
+p_tris <- ggplot() +
+  geom_polygon(data = blob_outlines, aes(x, y, colour = id, group = id),
+               fill = NA, linewidth = 0.9) +
+  geom_polygon(data = tri_outlines,
+               aes(x, y, group = interaction(blob, tri)),
+               fill = NA, colour = "grey50", linewidth = 0.3) +
+  scale_colour_manual(values = region_colours) +
+  labs(title = "Triangulated", x = NULL, y = NULL) +
+  theme_article()
+
+p_samp2 <- ggplot() +
+  geom_polygon(data = blob_outlines, aes(x, y, colour = id, group = id),
+               fill = NA, linewidth = 0.5, linetype = "dashed") +
+  geom_point(data = blob_samples, aes(x, y, colour = id),
+             size = 1.0, alpha = 0.8) +
+  scale_colour_manual(values = region_colours) +
+  labs(title = "QMC samples (16 per triangle)", x = NULL, y = NULL) +
+  theme_article()
+
+grid.arrange(p_blobs, p_tris, p_samp2, ncol = 3)
+```
+
+The middle panel shows the triangulation explicitly. More triangles = more
+points = higher effective sampling density, without any special budget logic.
+
+---
+
+## Use Case 3: Quadrilaterals with Strata
+
+When basis functions have discontinuities at known boundaries, we intersect
+each footprint with the stratum polygons before triangulating. This guarantees
+no QMC point ever straddles a boundary.
+
+```{r uc3-quad-strata, fig.height = 4.5, fig.width = 9}
+stratum_A <- st_sfc(st_polygon(list(matrix(
+  c(1.0, 0.3, 1.6, 0.1, 2.3, 0.4, 2.5, 0.9,
+    2.1, 1.3, 1.4, 1.5, 0.9, 1.1, 0.8, 0.6, 1.0, 0.3),
+  ncol = 2, byrow = TRUE
+))))
+
+fp_sfc <- st_sfc(lapply(footprints, function(f) {
+  st_polygon(list(rbind(f, f[1, ])))
+}))
+
+domain    <- st_as_sfc(st_bbox(c(xmin = -0.5, ymin = -0.5, xmax = 4, ymax = 2.5)))
+stratum_B <- st_difference(domain, stratum_A)
+strata    <- list(A = stratum_A, B = stratum_B)
+
+intersect_with_strata <- function(poly, strata) {
+  lapply(strata, function(s) {
+    inter <- suppressWarnings(st_intersection(poly, s))
+    if (length(inter) == 0 || st_is_empty(inter)) return(NULL)
+    inter
+  })
+}
+
+fp_pieces <- lapply(seq_along(fp_sfc), function(i) {
+  intersect_with_strata(fp_sfc[i], strata)
+})
+
+fp_piece_tris <- lapply(fp_pieces, function(pieces) {
+  lapply(pieces, function(piece) {
+    if (is.null(piece)) return(NULL)
+    triangulate_polygon(piece)
+  })
+})
+
+stratum_A_coords <- st_coordinates(stratum_A)
+stratum_A_df     <- data.frame(x = stratum_A_coords[, "X"],
+                                y = stratum_A_coords[, "Y"])
+
+piece_outlines <- do.call(bind_rows, lapply(seq_along(fp_pieces), function(i) {
+  do.call(bind_rows, lapply(names(strata), function(sname) {
+    piece <- fp_pieces[[i]][[sname]]
+    if (is.null(piece)) return(NULL)
+    coords <- st_coordinates(piece)
+    data.frame(x = coords[, "X"], y = coords[, "Y"],
+               fp = factor(i), stratum = sname,
+               group = paste(i, sname))
+  }))
+}))
+
+piece_samples <- do.call(bind_rows, lapply(seq_along(fp_piece_tris), function(i) {
+  do.call(bind_rows, lapply(names(strata), function(sname) {
+    tris <- fp_piece_tris[[i]][[sname]]
+    if (is.null(tris) || length(tris) == 0) return(NULL)
+    sample_triangulation(tris, n_per_triangle = 16) |>
+      mutate(fp = factor(i), stratum = sname)
+  }))
+}))
+
+xlims <- c(-0.2, 3.8); ylims <- c(-0.2, 2.0)
+
+p_fp_only <- ggplot() +
+  geom_polygon(data = fp_outlines, aes(x, y, fill = id, colour = id, group = id),
+               alpha = 0.15, linewidth = 0.7) +
+  scale_fill_manual(values = region_colours) +
+  scale_colour_manual(values = region_colours) +
+  coord_cartesian(xlim = xlims, ylim = ylims) +
+  labs(title = "Footprints", x = NULL, y = NULL) +
+  theme_article()
+
+p_strata_only <- ggplot() +
+  geom_polygon(data = stratum_A_df, aes(x, y),
+               fill = stratum_colours["A"], alpha = 0.7,
+               colour = "grey30", linewidth = 0.7) +
+  annotate("text", x = 1.65, y = 0.8, label = "A",
+           size = 5, fontface = "bold", colour = "grey20") +
+  annotate("text", x = 3.2,  y = 1.7, label = "B",
+           size = 5, fontface = "bold", colour = "grey50") +
+  coord_cartesian(xlim = xlims, ylim = ylims) +
+  labs(title = "Strata", x = NULL, y = NULL) +
+  theme_article()
+
+p_combined <- ggplot() +
+  geom_polygon(data = stratum_A_df, aes(x, y),
+               fill = stratum_colours["A"], alpha = 0.5, colour = NA) +
+  geom_polygon(data = fp_outlines, aes(x, y, colour = id, group = id),
+               fill = NA, linewidth = 0.7) +
+  scale_colour_manual(values = region_colours) +
+  coord_cartesian(xlim = xlims, ylim = ylims) +
+  labs(title = "Combined", x = NULL, y = NULL) +
+  theme_article()
+
+p_samples <- ggplot() +
+  geom_polygon(data = stratum_A_df, aes(x, y),
+               fill = stratum_colours["A"], alpha = 0.3, colour = NA) +
+  geom_polygon(data = fp_outlines, aes(x, y, colour = id, group = id),
+               fill = NA, linewidth = 0.4, linetype = "dashed") +
+  geom_point(data = piece_samples, aes(x, y, colour = fp, shape = stratum),
+             size = 1.3, alpha = 0.85) +
+  scale_colour_manual(values = region_colours) +
+  scale_shape_manual(values  = c(A = 17, B = 16)) +
+  coord_cartesian(xlim = xlims, ylim = ylims) +
+  labs(title = "QMC samples (▲ = A, ● = B)", x = NULL, y = NULL) +
+  theme_article()
+
+grid.arrange(p_fp_only, p_strata_only, p_combined, p_samples, ncol = 4)
+```
+
+Stratum A is small — fewer triangles fall in it, so it gets fewer points
+naturally. No point crosses the A/B boundary because the intersection step
+happens before triangulation.
+
+---
+
+## Use Case 4: Irregular Polygons with Strata
+
+The same pipeline as UC3, but the observation polygons are irregular blobs
+rather than parallelograms. The code is identical — shape complexity is
+absorbed by triangulation.
+
+```{r uc4-irregular-strata, fig.height = 4.5, fig.width = 9}
+blob_pieces <- lapply(seq_along(blobs), function(i) {
+  intersect_with_strata(blobs[i], strata)
+})
+
+blob_piece_tris <- lapply(blob_pieces, function(pieces) {
+  lapply(pieces, function(piece) {
+    if (is.null(piece)) return(NULL)
+    triangulate_polygon(piece)
+  })
+})
+
+blob_piece_outlines <- do.call(bind_rows, lapply(seq_along(blob_pieces), function(i) {
+  do.call(bind_rows, lapply(names(strata), function(sname) {
+    piece <- blob_pieces[[i]][[sname]]
+    if (is.null(piece)) return(NULL)
+    coords <- st_coordinates(piece)
+    data.frame(x = coords[, "X"], y = coords[, "Y"],
+               blob = factor(i), stratum = sname,
+               group = paste(i, sname))
+  }))
+}))
+
+blob_piece_samples <- do.call(bind_rows, lapply(seq_along(blob_piece_tris), function(i) {
+  do.call(bind_rows, lapply(names(strata), function(sname) {
+    tris <- blob_piece_tris[[i]][[sname]]
+    if (is.null(tris) || length(tris) == 0) return(NULL)
+    sample_triangulation(tris, n_per_triangle = 16) |>
+      mutate(blob = factor(i), stratum = sname)
+  }))
+}))
+
+p_fp4_only <- ggplot() +
+  geom_polygon(data = blob_outlines, aes(x, y, fill = id, colour = id, group = id),
+               alpha = 0.15, linewidth = 0.8) +
+  scale_fill_manual(values = region_colours) +
+  scale_colour_manual(values = region_colours) +
+  labs(title = "Irregular polygons", x = NULL, y = NULL) +
+  theme_article()
+
+p_strata4_only <- ggplot() +
+  geom_polygon(data = stratum_A_df, aes(x, y),
+               fill = stratum_colours["A"], alpha = 0.7,
+               colour = "grey30", linewidth = 0.7) +
+  annotate("text", x = 1.65, y = 0.8, label = "A",
+           size = 5, fontface = "bold", colour = "grey20") +
+  annotate("text", x = 3.2,  y = 1.7, label = "B",
+           size = 5, fontface = "bold", colour = "grey50") +
+  labs(title = "Strata", x = NULL, y = NULL) +
+  theme_article()
+
+p_combined4 <- ggplot() +
+  geom_polygon(data = stratum_A_df, aes(x, y),
+               fill = stratum_colours["A"], alpha = 0.5, colour = NA) +
+  geom_polygon(data = blob_outlines, aes(x, y, colour = id, group = id),
+               fill = NA, linewidth = 0.7) +
+  scale_colour_manual(values = region_colours) +
+  labs(title = "Combined", x = NULL, y = NULL) +
+  theme_article()
+
+p_samp4 <- ggplot() +
+  geom_polygon(data = stratum_A_df, aes(x, y),
+               fill = stratum_colours["A"], alpha = 0.3, colour = NA) +
+  geom_polygon(data = blob_outlines, aes(x, y, colour = id, group = id),
+               fill = NA, linewidth = 0.4, linetype = "dashed") +
+  geom_point(data = blob_piece_samples,
+             aes(x, y, colour = blob, shape = stratum),
+             size = 1.3, alpha = 0.85) +
+  scale_colour_manual(values = region_colours) +
+  scale_shape_manual(values  = c(A = 17, B = 16)) +
+  labs(title = "QMC samples (▲ = A, ● = B)", x = NULL, y = NULL) +
+  theme_article()
+
+grid.arrange(p_fp4_only, p_strata4_only, p_combined4, p_samp4, ncol = 4)
+```
+
+Identical pipeline to UC3. The irregular shapes produce more triangles in some
+regions, giving them higher sampling density automatically.
+
+---
+
+## Summary
+
+Layer 1 is just two functions. Everything else is geometry preparation.
+
+| Step | Function | Layer |
+|---|---|---|
+| Generate QMC points | `generate_qmc_unit_square(n)` | 1 |
+| Map points into triangle | `map_unit_square_to_triangle(pts, coords)` | 1 |
+| Triangulate a polygon | `triangulate_sf()` | 2 |
+| Intersect with strata | `st_intersection()` | 2 |
+| Loop, weight, accumulate | `integrate_one_sounding()` | 4 |
+
+The four use cases above show how UC3 and UC4 differ from UC1 and UC2 only in
+the geometry preparation step — the Layer 1 calls are identical in all cases.
