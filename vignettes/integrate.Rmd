@@ -1,0 +1,343 @@
+---
+title: "integrate_basis: Numerical Integration over Polygons"
+description: >
+  How to use integrate_basis() to compute area-weighted averages of functions
+  over sf polygons, with and without stratum boundaries.
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{integrate_basis: Numerical Integration over Polygons}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  fig.width = 7,
+  fig.height = 4,
+  dpi = 150
+)
+library(spatintegrate)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+
+theme_article <- function() {
+  theme_minimal(base_size = 11) +
+    theme(panel.border = element_rect(fill = NA, colour = "grey60"),
+          legend.position = "none")
+}
+```
+
+`integrate_basis()` is the main function of `spatintegrate`. Given a function
+`basis_fn` and a set of polygons, it returns an $n \times k$ matrix $A$ where:
+
+$$A_{ij} = \frac{1}{|D_i|} \int_{D_i} \phi_j(s) \, ds$$
+
+Each row is one polygon, each column is one output of `basis_fn`. The integral
+is approximated by triangulating each polygon and applying QMC quadrature with
+`n_per_triangle` Sobol points per triangle.
+
+---
+
+## The `basis_fn` contract
+
+`basis_fn` must accept an $n \times 2$ matrix of projected $(x, y)$ coordinates
+and return an $n \times k$ matrix. The value of $k$ is inferred automatically
+— you don't pass it.
+
+```{r basis-contract}
+# Gaussian bump centred at (cx, cy) with bandwidth sigma — k = 1
+gaussian_basis <- function(coords, cx = 150, cy = 100, sigma = 80) {
+  d2 <- (coords[, 1] - cx)^2 + (coords[, 2] - cy)^2
+  matrix(exp(-d2 / (2 * sigma^2)), ncol = 1)
+}
+
+# Verify the contract: 3 points in, 3x1 matrix out
+test_pts <- matrix(c(100,100,  200,50,  300,150), ncol = 2, byrow = TRUE)
+gaussian_basis(test_pts)
+```
+
+This is the basis used throughout this vignette. Its integral over an arbitrary
+polygon has no closed form — the QMC approximation has to do genuine work,
+unlike a constant function which would be trivially exact regardless of
+sampling density.
+
+---
+
+## Basic usage
+
+```{r setup-polygons, fig.height = 3.5}
+# Four overlapping parallelogram polygons in UTM 19N (meters)
+make_parallelogram <- function(x0, y0, w, h, shear) {
+  sf::st_polygon(list(matrix(c(
+    x0,             y0,
+    x0 + w,         y0,
+    x0 + w + shear, y0 + h,
+    x0 + shear,     y0 + h,
+    x0,             y0
+  ), ncol = 2, byrow = TRUE)))
+}
+
+polygons_sf <- sf::st_sf(
+  id       = 1:4,
+  geometry = sf::st_sfc(
+    make_parallelogram(0,   0,   200, 100, 30),
+    make_parallelogram(80,  20,  200, 100, 30),
+    make_parallelogram(160, 40,  200, 100, 30),
+    make_parallelogram(40,  80,  200, 100, 30)
+  ),
+  crs = 32619
+)
+
+poly_df <- do.call(bind_rows, lapply(1:4, function(i) {
+  coords <- sf::st_coordinates(polygons_sf[i, ])
+  data.frame(x = coords[,"X"], y = coords[,"Y"], id = factor(i))
+}))
+
+ggplot() +
+  geom_polygon(data = poly_df, aes(x, y, fill = id, colour = id, group = id),
+               alpha = 0.2, linewidth = 0.8) +
+  scale_fill_manual(values = c("#2166ac","#d6604d","#4dac26","#8073ac")) +
+  scale_colour_manual(values = c("#2166ac","#d6604d","#4dac26","#8073ac")) +
+  coord_equal() +
+  labs(title = "Four overlapping polygons", x = NULL, y = NULL) +
+  theme_article()
+```
+
+The `gaussian_basis` defined above is used throughout. Values differ across
+polygons because they sit at different distances from the bump centre.
+
+```{r basic-integrate}
+A <- integrate_basis(gaussian_basis, polygons_sf)
+cat("Gaussian basis integrals (one per polygon):\n")
+print(round(A, 6))
+```
+
+The values differ across polygons because they sit in different positions
+relative to the bump centre — polygons closer to $(150, 100)$ accumulate
+higher average values.
+
+---
+
+## Verifying integration accuracy
+
+Without a closed-form answer, we use high-n Monte Carlo as a reference.
+Uniform random sampling at large $n$ is an unbiased estimator, so its value
+at $n = 100{,}000$ is a reliable benchmark:
+
+```{r accuracy, fig.height = 3.5}
+# Monte Carlo reference at high n (unbiased, converges slowly)
+mc_reference <- function(polygon_sfc, n = 100000) {
+  bbox   <- sf::st_bbox(polygon_sfc)
+  pts    <- matrix(c(
+    runif(n, bbox["xmin"], bbox["xmax"]),
+    runif(n, bbox["ymin"], bbox["ymax"])
+  ), ncol = 2)
+  pts_sfc <- sf::st_sfc(lapply(seq_len(n), function(i) sf::st_point(pts[i,])),
+                         crs = sf::st_crs(polygon_sfc))
+  inside  <- as.vector(sf::st_within(pts_sfc, polygon_sfc, sparse = FALSE))
+  if (sum(inside) == 0) return(NA_real_)
+  mean(gaussian_basis(pts[inside, , drop = FALSE]))
+}
+
+set.seed(42)
+reference <- sapply(seq_len(nrow(polygons_sf)), function(i) {
+  mc_reference(sf::st_geometry(polygons_sf)[i])
+})
+
+A_qmc <- integrate_basis(gaussian_basis, polygons_sf, n_per_triangle = 32)
+
+results <- data.frame(
+  polygon   = 1:4,
+  QMC_n16   = round(integrate_basis(gaussian_basis, polygons_sf, n_per_triangle = 16)[,1], 6),
+  QMC_n32   = round(A_qmc[, 1], 6),
+  MC_ref    = round(reference, 6)
+)
+knitr::kable(results, caption = "QMC vs Monte Carlo reference (n = 100,000)")
+```
+
+QMC at `n_per_triangle = 32` matches the high-n Monte Carlo reference closely,
+and it got there with far fewer function evaluations.
+
+---
+
+## `n_per_triangle`: accuracy vs cost
+
+```{r n_per_triangle, fig.height = 3.5}
+ns     <- c(4, 8, 16, 32, 64, 128)
+errors <- sapply(ns, function(n) {
+  A <- integrate_basis(gaussian_basis, polygons_sf, n_per_triangle = n)
+  mean(abs(A[, 1] - reference))
+})
+
+err_df <- data.frame(n_per_triangle = ns, mean_abs_error = errors)
+
+ggplot(err_df, aes(n_per_triangle, mean_abs_error)) +
+  geom_line(colour = "#2166ac", linewidth = 0.8) +
+  geom_point(colour = "#2166ac", size = 2.5) +
+  scale_x_log10(breaks = ns) +
+  scale_y_log10() +
+  labs(title    = "Integration error vs n_per_triangle",
+       subtitle = "Mean absolute error vs Monte Carlo reference (n = 100,000)",
+       x = "n_per_triangle", y = "Mean absolute error (log scale)") +
+  theme_article() +
+  theme(legend.position = "none")
+```
+
+Error falls roughly as $O(n^{-1})$ for QMC — faster than the $O(n^{-1/2})$
+of plain Monte Carlo. For most smooth basis functions `n_per_triangle = 16`
+(the default) is more than sufficient.
+
+---
+
+## Strata
+
+When `basis_fn` has discontinuities at known boundaries — e.g. a covariance
+kernel that treats two regions as uncorrelated — supply `strata_sf`. Each
+polygon is intersected with each stratum before triangulating, guaranteeing
+that no QMC point straddles a boundary.
+
+Here the stratum is a small circle sitting inside the scene. Stratum A is the
+circle, stratum B is everything else.
+
+```{r strata-setup, fig.height = 4}
+# Small circle stratum centred at (150, 80), radius 60m
+circle <- sf::st_buffer(
+  sf::st_sfc(sf::st_point(c(150, 80)), crs = 32619),
+  dist = 60
+)
+domain   <- sf::st_as_sfc(sf::st_bbox(
+  c(xmin = -50, ymin = -50, xmax = 450, ymax = 250),
+  crs = 32619
+))
+strata_sf <- sf::st_sf(
+  name     = c("circle", "outside"),
+  geometry = sf::st_sfc(
+    sf::st_geometry(circle)[[1]],
+    sf::st_geometry(sf::st_difference(domain, circle))[[1]],
+    crs = 32619
+  )
+)
+
+# Visualise polygons + stratum
+circle_df <- as.data.frame(sf::st_coordinates(circle))
+
+ggplot() +
+  geom_polygon(data = poly_df, aes(x, y, fill = id, colour = id, group = id),
+               alpha = 0.15, linewidth = 0.8) +
+  geom_polygon(data = circle_df, aes(X, Y),
+               fill = "#d6604d", alpha = 0.35,
+               colour = "#d6604d", linewidth = 1) +
+  scale_fill_manual(values = c("#2166ac","#d6604d","#4dac26","#8073ac")) +
+  scale_colour_manual(values = c("#2166ac","#d6604d","#4dac26","#8073ac")) +
+  coord_equal() +
+  labs(title    = "Polygons with circular stratum (red)",
+       subtitle = "QMC points will be confined within or outside the circle",
+       x = NULL, y = NULL) +
+  theme_article()
+```
+
+```{r strata-integrate}
+A_strat <- integrate_basis(gaussian_basis, polygons_sf,
+                            strata_sf      = strata_sf,
+                            n_per_triangle = 32)
+
+cat("With strata — Gaussian integrals:\n")
+print(round(A_strat, 6))
+
+cat("\nWithout strata:\n")
+print(round(A_qmc, 6))
+
+cat("\nDifference (should be small — same integral, different sampling):\n")
+print(round(A_strat - A_qmc, 6))
+```
+
+The results with and without strata should be nearly identical — both are
+approximating the same integral. The difference is that with strata, no QMC
+point lies on the circle boundary, which matters when `basis_fn` treats the
+inside and outside as categorically different regions.
+
+```{r strata-plot, fig.height = 4}
+# Show the intersection pieces for polygon 1
+pieces <- lapply(seq_len(nrow(strata_sf)), function(i) {
+  inter <- suppressWarnings(
+    sf::st_intersection(sf::st_geometry(polygons_sf)[1],
+                        sf::st_geometry(strata_sf)[i])
+  )
+  if (length(inter) == 0 || sf::st_is_empty(inter)) return(NULL)
+  data.frame(sf::st_coordinates(inter), stratum = strata_sf$name[i])
+})
+pieces_df <- do.call(rbind, Filter(Negate(is.null), pieces))
+
+ggplot() +
+  geom_polygon(data = poly_df |> filter(id == 1), aes(x, y),
+               fill = NA, colour = "black", linewidth = 1) +
+  geom_polygon(data = pieces_df, aes(X, Y, fill = stratum, group = L2),
+               alpha = 0.4, colour = "grey30", linewidth = 0.5) +
+  scale_fill_manual(values = c(circle = "#d6604d", outside = "#a6cee3")) +
+  coord_equal() +
+  labs(title = "Polygon 1 intersected with strata",
+       fill = "Stratum", x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(panel.border = element_rect(fill = NA, colour = "grey60"))
+```
+
+---
+
+## What `basis_fn` receives
+
+It's worth being explicit about the coordinate system. `basis_fn` receives
+coordinates in the **same projected CRS as `polygons_sf`** — in meters for a
+UTM projection. Your basis function must be defined in that space.
+
+```{r coords-demo}
+# Capture what basis_fn actually receives for polygon 1
+captured_coords <- NULL
+capture_basis <- function(coords) {
+  captured_coords <<- coords
+  matrix(1, nrow = nrow(coords), ncol = 1)
+}
+integrate_basis(capture_basis, polygons_sf[1, ], n_per_triangle = 4)
+
+cat("Coordinates received by basis_fn (first 4 rows):\n")
+print(head(captured_coords, 4))
+cat("CRS: UTM 19N — units are meters\n")
+```
+
+---
+
+## Parallelism
+
+For large numbers of polygons, set `parallel_plan = "ambient"` and configure
+a `future` plan beforehand:
+
+```{r parallel, eval = FALSE}
+library(future)
+plan(multisession, workers = 4)
+
+A <- integrate_basis(gaussian_basis, polygons_sf, parallel_plan = "ambient")
+
+plan(sequential)  # reset when done
+```
+
+The QMC sequence is generated once and shared across all workers, so results
+are identical to sequential execution.
+
+---
+
+## Summary
+
+| Argument | Default | Purpose |
+|---|---|---|
+| `basis_fn` | required | Function: n×2 coords → n×k matrix |
+| `polygons_sf` | required | sf object of polygons to integrate over |
+| `strata_sf` | `NULL` | Optional strata for discontinuous basis functions |
+| `n_per_triangle` | `16` | QMC points per triangle — controls accuracy |
+| `min_area` | `0` | Drop triangles at or below this area |
+| `parallel_plan` | `"sequential"` | `"ambient"` to use `future::plan()` |
+
+The key constraint: `polygons_sf` (and `strata_sf` if supplied) must be in a
+**projected CRS**. Use `ensure_projected()` to convert geographic inputs first.

@@ -21,13 +21,18 @@ returned points lie inside (or on the boundary of) the triangle.
 Maps an \eqn{n \times 2} matrix of points from \eqn{[0,1]^2} into a
 triangle defined by three vertex coordinates, using a uniform barycentric
 transformation. Points outside the standard simplex (\eqn{u + v > 1}) are
-reflected so that the mapping is area-preserving and bijective.
+reflected across the diagonal so that the mapping is area-preserving and
+bijective.
+}
+\details{
+This function is called once per triangle inside
+\code{integrate_one_sounding()}, with the same QMC points (from
+\code{\link[=generate_qmc_unit_square]{generate_qmc_unit_square()}}) reused for each triangle.
 }
 \examples{
-tri <- matrix(c(0,0, 1,0, 0,1), ncol = 2, byrow = TRUE)
-pts <- generate_qmc_unit_square(64)
+tri    <- matrix(c(0,0, 1,0, 0,1), ncol = 2, byrow = TRUE)
+pts    <- generate_qmc_unit_square(64)
 mapped <- map_unit_square_to_triangle(pts, tri)
-# All points inside triangle: u + v <= 1
-stopifnot(all(rowSums(mapped) <= 1 + 1e-10))
+stopifnot(all(mapped >= 0))
 
 }

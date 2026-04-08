@@ -14,9 +14,14 @@ An \eqn{n \times 2} numeric matrix. All values are in \eqn{[0, 1]}.
 }
 \description{
 Returns an \eqn{n \times 2} matrix of quasi-Monte Carlo points in
-\eqn{[0,1]^2} using a scrambled Sobol sequence. Points are suitable for
-mapping into triangle or quadrilateral regions via
-\code{\link[=map_unit_square_to_triangle]{map_unit_square_to_triangle()}} or \code{\link[=map_unit_square_to_quad]{map_unit_square_to_quad()}}.
+\eqn{[0,1]^2} using a Sobol sequence. Points are suitable for mapping into
+triangle regions via \code{\link[=map_unit_square_to_triangle]{map_unit_square_to_triangle()}}.
+}
+\details{
+A single call to this function is typically made once per sounding and the
+result reused across all triangles in that sounding's triangulation — the
+same Sobol sequence mapped independently into each triangle is correct
+because the barycentric mapping is independent per triangle.
 }
 \examples{
 pts <- generate_qmc_unit_square(128)

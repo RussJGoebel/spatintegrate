@@ -1,0 +1,290 @@
+---
+title: "Computing overlap fractions between soundings and a fine grid"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Computing overlap fractions between soundings and a fine grid}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  fig.width  = 5,
+  fig.height = 5
+)
+```
+
+`compute_overlap_fractions()` computes the change-of-support matrix $A$ where
+entry $A_{ij}$ is the fraction of sounding $i$'s area covered by fine-grid
+cell $j$:
+
+$$A_{ij} = \frac{|D_i \cap D_j^{(\ell)}|}{|D_i|}$$
+
+The denominator is always the **sounding area** $|D_i|$, not the cell area.
+Row $i$ sums to 1 when the sounding lies entirely within the grid, and to less
+than 1 when it extends beyond the grid boundary.
+
+This vignette builds up from the simplest possible case to a more realistic
+one, so the results can be verified by eye at each step.
+
+## Setup
+
+```{r libraries}
+library(sf)
+library(ggplot2)
+library(spatintegrate)
+```
+
+```{r helpers}
+# Build a single rectangular cell as an sfg
+make_cell <- function(x0, y0, w = 1, h = w) {
+  st_polygon(list(matrix(
+    c(x0,   y0,
+      x0+w, y0,
+      x0+w, y0+h,
+      x0,   y0+h,
+      x0,   y0),
+    ncol = 2, byrow = TRUE
+  )))
+}
+
+# Build a regular grid of nrow x ncol unit cells
+make_grid <- function(nrow, ncol, crs = 32619) {
+  cells <- vector("list", nrow * ncol)
+  k <- 1L
+  for (r in 0:(nrow - 1)) {
+    for (c in 0:(ncol - 1)) {
+      cells[[k]] <- make_cell(c, r)
+      k <- k + 1L
+    }
+  }
+  st_sf(
+    cell     = seq_len(nrow * ncol),
+    geometry = st_sfc(cells, crs = crs)
+  )
+}
+
+# Standard plot used across all examples
+plot_overlap <- function(fine_grid, soundings, title, subtitle = NULL) {
+  # Format labels: integers as "1", fractions as "0.417", zeros as "0"
+  fmt <- function(x) {
+    ifelse(x == 0, "0",
+      ifelse(abs(x - round(x)) < 1e-9,
+        as.character(as.integer(round(x))),
+        as.character(round(x, 3))
+      )
+    )
+  }
+
+  ggplot() +
+    geom_sf(
+      data      = fine_grid,
+      aes(fill  = fraction),
+      colour    = "grey40",
+      linewidth = 0.4
+    ) +
+    geom_sf(
+      data      = soundings,
+      fill      = NA,
+      colour    = "#0F6E56",
+      linewidth = 0.9,
+      linetype  = "dashed"
+    ) +
+    geom_sf_text(
+      data        = fine_grid,
+      aes(label   = fmt(fraction)),
+      size        = 3.5,
+      colour      = "grey15"
+    ) +
+    scale_fill_distiller(
+      palette   = "Greens",
+      direction = 1,
+      limits    = c(0, 1),
+      name      = "Overlap\nfraction"
+    ) +
+    labs(
+      title    = title,
+      subtitle = if (!is.null(subtitle)) subtitle else
+        "Each label: A[i,j] = |sounding \u2229 cell j| / |sounding|",
+      x = NULL,
+      y = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid      = element_blank(),
+      axis.text       = element_blank(),
+      plot.title      = element_text(size = 11, face = "bold"),
+      plot.subtitle   = element_text(size = 9, colour = "grey40"),
+      legend.position = "right"
+    )
+}
+```
+
+---
+
+## Example 1: sounding exactly partitioned into 4 equal cells
+
+The simplest possible check. The sounding coincides exactly with the outer
+boundary of a $2 \times 2$ grid of unit cells. Each cell takes up exactly
+one quarter of the sounding, so every entry should be $0.25$ and the row
+should sum to $1$.
+
+```{r ex1-build}
+fine_grid_1 <- make_grid(nrow = 2, ncol = 2)
+
+sounding_1 <- st_sf(
+  sounding = "full",
+  geometry = st_sfc(make_cell(0, 0, w = 2, h = 2), crs = 32619)
+)
+```
+
+```{r ex1-compute}
+A1 <- compute_overlap_fractions(sounding_1, fine_grid_1)
+A1
+Matrix::rowSums(A1)
+```
+
+All four entries are $0.25$ and the row sums to $1$. ✓
+
+```{r ex1-plot, fig.alt = "2x2 grid fully covered by sounding, all fractions 0.25"}
+fine_grid_1$fraction <- as.numeric(A1[1, ])
+plot_overlap(
+  fine_grid_1, sounding_1,
+  title    = "Example 1: sounding = full 2 \u00d7 2 grid",
+  subtitle = "All four cells get exactly 1/4 of the sounding area"
+)
+```
+
+---
+
+## Example 2: sounding offset to one side (row sum = 1)
+
+Now the sounding sits entirely within the grid but is not centred. We use
+a $2.4 \times 1$ sounding over a $3 \times 1$ grid of unit cells, flush to
+the left edge. Sounding area $= 2.4$.
+
+The expected fractions are easy to work out:
+
+| Cell  | Intersection | Area | Fraction ($\div\, 2.4$) |
+|-------|--------------|------|-------------------------|
+| left  | full cell    | 1.0  | $1/2.4 \approx$ **0.417** |
+| mid   | full cell    | 1.0  | $1/2.4 \approx$ **0.417** |
+| right | left 40%     | 0.4  | $0.4/2.4 \approx$ **0.167** |
+
+Row sum: $0.417 + 0.417 + 0.167 = 1.0$ ✓
+
+```{r ex2-build}
+fine_grid_2 <- make_grid(nrow = 1, ncol = 3)
+
+sounding_2 <- st_sf(
+  sounding = "offset",
+  geometry = st_sfc(make_cell(0, 0, w = 2.4, h = 1), crs = 32619)
+)
+```
+
+```{r ex2-compute}
+A2 <- compute_overlap_fractions(sounding_2, fine_grid_2)
+round(A2, 3)
+round(Matrix::rowSums(A2), 10)
+```
+
+```{r ex2-plot, fig.width = 6, fig.height = 2.5,
+    fig.alt = "3x1 grid with sounding covering left 2.4 cells"}
+fine_grid_2$fraction <- as.numeric(A2[1, ])
+plot_overlap(
+  fine_grid_2, sounding_2,
+  title    = "Example 2: sounding partially overlaps right cell",
+  subtitle = "Sounding area = 2.4; right cell is 40% covered so gets 40% of a full-cell share"
+)
+```
+
+The dashed sounding outline visibly cuts $40\%$ of the way into the right
+cell. Its fraction ($\approx 0.167$) is exactly $40\%$ of a full-cell share
+($\approx 0.417$). ✓
+
+---
+
+## Example 3: sounding extends beyond the grid (row sum < 1)
+
+When part of the sounding falls outside the grid the row sum drops below 1 —
+the "missing" fraction is the portion of the sounding area with no latent
+cells beneath it. This is the typical situation at the edges of an OCO-2
+target-mode domain.
+
+We use a $4 \times 4$ sounding centred on a $3 \times 3$ fine grid, so the
+sounding overhangs by $0.5$ units on each side. Sounding area $= 16$; total
+grid area $= 9$. Since the sounding is centred and rectangular, every grid
+cell is fully enclosed, so all 9 entries equal $1/16 = 0.0625$ and the row
+sums to $9/16 = 0.5625$.
+
+```{r ex3-build}
+fine_grid_3 <- make_grid(nrow = 3, ncol = 3)
+
+# Centre the 4x4 sounding on the 3x3 grid
+sounding_3 <- st_sf(
+  sounding = "overhanging",
+  geometry = st_sfc(make_cell(-0.5, -0.5, w = 4, h = 4), crs = 32619)
+)
+```
+
+```{r ex3-compute}
+A3 <- compute_overlap_fractions(sounding_3, fine_grid_3)
+round(A3, 4)
+round(Matrix::rowSums(A3), 6)  # 9/16 = 0.5625
+```
+
+```{r ex3-plot, fig.alt = "3x3 grid fully inside an overhanging sounding"}
+fine_grid_3$fraction <- as.numeric(A3[1, ])
+plot_overlap(
+  fine_grid_3, sounding_3,
+  title    = "Example 3: sounding extends beyond the grid",
+  subtitle = paste0(
+    "Row sum = ", round(Matrix::rowSums(A3), 4),
+    " \u2248 9/16 \u2014 only 9/16 of the sounding area overlaps the grid"
+  )
+)
+```
+
+The sounding outline (dashed) extends well past all four edges. Every cell is
+fully enclosed and equally covered, so all fractions are $1/16 = 0.0625$. The
+row sum of $0.5625$ tells us that just over half the sounding's signal is
+"seen" by the latent grid — the rest falls outside and is unmodelled. ✓
+
+---
+
+## Connecting to the downscaling model
+
+`A` plugs directly into the Bayesian downscaling model as the linear map
+from the latent fine-grid vector $r^{(\ell)}$ to the coarse observations:
+
+$$y^{(o)} = X^{(o)} \beta + A\, r^{(\ell)} + \varepsilon$$
+
+The sparsity of `A` is essential at scale. Each sounding overlaps only a
+small number of fine-grid cells, so the vast majority of entries are zero.
+At OCO-2 target-mode scale (6850 soundings, ~50 000 cells), sparsity exceeds
+99%:
+
+```{r sparsity, eval = FALSE}
+cat("Dimensions:", nrow(A_large), "soundings x", ncol(A_large), "cells\n")
+cat("Non-zero  :", Matrix::nnzero(A_large), "\n")
+cat("Sparsity  :", round(1 - Matrix::nnzero(A_large) / prod(dim(A_large)), 3), "\n")
+```
+
+## Parallel execution
+
+For large inputs, parallelise over soundings using any `future` backend:
+
+```{r parallel, eval = FALSE}
+library(future)
+plan(multisession, workers = 4)
+
+A_large <- compute_overlap_fractions(
+  soundings = oco2_soundings,
+  fine_grid  = boston_grid,
+  parallel  = TRUE
+)
+
+plan(sequential)
+```
