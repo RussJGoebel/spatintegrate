@@ -1,0 +1,550 @@
+---
+title: "Comparing SAR-Raster and Fourier-SAR Downscaling"
+description: >
+  A practitioner-oriented comparison of SAR-raster and Fourier-SAR
+  representations for Bayesian downscaling, showing how the same SAR
+  parameters can be translated into a spectral Fourier basis.
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Comparing SAR-Raster and Fourier-SAR Downscaling}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  fig.width = 7,
+  fig.height = 4,
+  dpi = 150
+)
+
+library(spatintegrate)
+library(fastblm)
+library(sf)
+library(Matrix)
+library(spdep)
+library(ggplot2)
+
+theme_vignette <- function() {
+  theme_minimal(base_size = 11) +
+    theme(panel.border = element_rect(fill = NA, colour = "grey60"))
+}
+
+rmse <- function(x, truth) {
+  sqrt(mean((x - truth)^2, na.rm = TRUE))
+}
+
+make_rect_domain <- function(domain_bbox, crs) {
+  sf::st_as_sfc(
+    sf::st_bbox(
+      setNames(as.numeric(domain_bbox), c("xmin", "ymin", "xmax", "ymax")),
+      crs = crs
+    )
+  )
+}
+
+make_rook_W <- function(grid_sf) {
+  # Neumann-reflection W: the unique W whose eigenvectors are the 2D
+  # Neumann cosine functions cos((k1-1)*pi*i/m)*cos((k2-1)*pi*j/m),
+  # with eigenvalues (cos(pi*(k1-1)/m) + cos(pi*(k2-1)/m))/2.
+  #
+  # Construction: each cell has weight 1/4 per neighbor (off-diagonal),
+  # plus 1/4 added to the diagonal for each MISSING neighbor (Neumann
+  # reflection: the ghost cell outside the boundary equals the boundary
+  # cell itself). Equivalently:
+  #   diagonal entry = (4 - number of real neighbors) / 4
+  #   off-diagonal   = 1/4 for each real neighbor
+  # This makes W symmetric and row-sums = 1 everywhere.
+  nb <- spdep::poly2nb(grid_sf, queen = FALSE)
+  n  <- length(nb)
+
+  # Off-diagonal entries: weight 1/4 per real neighbor
+  i_off <- rep(seq_len(n), lengths(nb))
+  j_off <- unlist(nb, use.names = FALSE)
+  if (length(i_off) == 0L) stop("No neighboring grid cells were found.")
+
+  # Diagonal entries: (4 - n_neighbors) / 4  [Neumann reflection contribution]
+  n_nb    <- lengths(nb)
+  i_diag  <- seq_len(n)
+  j_diag  <- seq_len(n)
+  w_diag  <- (4L - n_nb) / 4
+
+  # Combine
+  i_all <- c(i_off, i_diag[w_diag > 0])
+  j_all <- c(j_off, j_diag[w_diag > 0])
+  w_all <- c(rep(1/4, length(i_off)), w_diag[w_diag > 0])
+
+  Matrix::sparseMatrix(i = i_all, j = j_all, x = w_all,
+                       dims = c(n, n))
+}
+
+make_sar_precision <- function(grid_sf, rho, tau2) {
+  if (!is.numeric(rho) || length(rho) != 1L || rho <= 0 || rho >= 1)
+    stop("`rho` must be a scalar in (0, 1).")
+  if (!is.numeric(tau2) || length(tau2) != 1L || tau2 <= 0)
+    stop("`tau2` must be a positive scalar.")
+  W <- make_rook_W(grid_sf)
+  I <- Matrix::Diagonal(nrow(W))
+  Matrix::crossprod(I - rho * W) / tau2
+}
+
+# Evaluate the Neumann cosine basis at arbitrary point locations.
+# Matches fourier_integrate_basis() exactly:
+#   phi_j(s) = c_j * cos((j1-1)*pi*s_x/Lx) * cos((j2-1)*pi*s_y/Ly)
+# coords   : n x 2 matrix of (x, y) in CRS units
+# freq_grid: list from fourier_freq_grid()
+fourier_evaluate_basis <- function(coords, freq_grid) {
+  bbox  <- freq_grid$domain_bbox
+  Lx    <- bbox[3] - bbox[1]
+  Ly    <- bbox[4] - bbox[2]
+  ox    <- freq_grid$omega_mat[, 1]   # (j1-1)*pi/Lx  for each basis fn
+  oy    <- freq_grid$omega_mat[, 2]   # (j2-1)*pi/Ly
+  nc    <- freq_grid$norm_const
+
+  sx <- as.matrix(coords)[, 1]
+  sy <- as.matrix(coords)[, 2]
+
+  # outer products: each row is one location, each col is one basis fn
+  cos_x <- cos(outer(sx, ox))   # n x r
+  cos_y <- cos(outer(sy, oy))   # n x r
+
+  sweep(cos_x * cos_y, 2, nc, `*`)   # apply norm_const column-wise
+}
+```
+
+This vignette compares two ways of fitting the same downscaling model:
+
+1. a **SAR-raster model**, where the latent field is represented by one value per
+   grid cell; and
+
+2. a **Fourier-SAR model**, where the latent field is represented by Fourier
+   basis coefficients, but the prior is parameterized using familiar SAR
+   parameters.
+
+The main message is that the observation model is unchanged. In both cases,
+
+\[
+y = A\theta + \epsilon.
+\]
+
+What changes is the meaning of \(\theta\) and the construction of \(A\).
+
+In the SAR-raster model, \(\theta\) is a vector of grid-cell values and \(A\)
+contains area-overlap fractions. In the Fourier-SAR model, \(\theta\) is a vector
+of Fourier coefficients and \(A\) contains exact footprint averages of Neumann
+cosine basis functions.
+
+The prior is also translated. The Fourier-SAR prior takes SAR parameters
+\((\rho, \tau^2)\), converts them internally to the matched Matérn/SPDE
+parameterization, and constructs the corresponding diagonal spectral precision.
+
+---
+
+## SAR and Fourier as two coordinate systems
+
+A SAR model encodes smoothness locally, through neighboring grid cells. A common
+rook-neighbor SAR precision has the form
+
+\[
+Q_{\mathrm{SAR}}
+=
+(I - \rho W)^\top (I - \rho W) / \tau^2,
+\]
+
+where \(W\) is a neighborhood matrix, \(\rho\) controls spatial dependence, and
+\(\tau^2\) controls prior scale.
+
+A Fourier-SAR model encodes the same idea spectrally. Low-frequency basis
+functions represent broad, smooth spatial variation. High-frequency basis
+functions represent rapidly oscillating spatial variation. The SAR-matched
+spectral prior gives larger prior variance to smooth low-frequency components
+and smaller prior variance to rough high-frequency components.
+
+A useful translation is:
+
+| SAR-raster view | Fourier-SAR view |
+|---|---|
+| Grid-cell values | Fourier coefficients |
+| Neighbor smoothing | Frequency-dependent shrinkage |
+| Sparse precision matrix | Diagonal spectral precision |
+| Refining the raster | Adding frequencies (increasing J) |
+| \(A\) averages pixels | \(A\) averages basis functions |
+| Prediction tied to fitted raster | Prediction at arbitrary points or regions |
+
+Thus, the Fourier formulation should be read as a change of basis, not as a
+different downscaling model.
+
+---
+
+## Step 1: create a synthetic latent field
+
+```{r make-domain}
+# Domain sized to observations: 5km obs window + 2.5km buffer each side = 10km
+domain_bbox <- c(0, 0, 10e3, 10e3)
+names(domain_bbox) <- c("xmin", "ymin", "xmax", "ymax")
+
+grid_n <- 120
+x_seq <- seq(domain_bbox["xmin"], domain_bbox["xmax"], length.out = grid_n)
+y_seq <- seq(domain_bbox["ymin"], domain_bbox["ymax"], length.out = grid_n)
+
+truth_df <- expand.grid(x = x_seq, y = y_seq)
+
+# Field varies on scale of the domain
+truth_df$truth <-
+  1.0 * sin(2 * pi * truth_df$x / 10e3) +
+  0.7 * cos(2 * pi * truth_df$y / 10e3) +
+  0.4 * sin(2 * pi * (truth_df$x + truth_df$y) / 6e3)
+
+truth_sf <- sf::st_as_sf(truth_df, coords = c("x", "y"), crs = 32619)
+
+ggplot(truth_df, aes(x, y, fill = truth)) +
+  geom_raster() +
+  coord_equal() +
+  labs(title = "Synthetic latent field",
+       x = "Easting (m)", y = "Northing (m)", fill = "v(s)") +
+  theme_vignette()
+```
+
+---
+
+## Step 2: create synthetic satellite footprints
+
+```{r make-footprints}
+make_footprint <- function(cx, cy, width = 1300, height = 2300, angle_deg = 15) {
+  angle <- angle_deg * pi / 180
+  hw <- width / 2; hh <- height / 2
+  corners <- matrix(c(-hw,-hh, hw,-hh, hw,hh, -hw,hh, -hw,-hh),
+                    ncol = 2, byrow = TRUE)
+  rot <- matrix(c(cos(angle), -sin(angle), sin(angle), cos(angle)), nrow = 2)
+  rotated <- corners %*% t(rot)
+  rotated[, 1] <- rotated[, 1] + cx
+  rotated[, 2] <- rotated[, 2] + cy
+  sf::st_polygon(list(rotated))
+}
+
+set.seed(1)
+n_soundings <- 250
+# 5km x 5km cluster centred in domain (2.5km - 7.5km), 2.5km buffer to boundary
+track_x <- runif(n_soundings, 2.5e3, 7.5e3)
+track_y <- runif(n_soundings, 2.5e3, 7.5e3)
+
+soundings_sf <- sf::st_sf(
+  id = seq_len(n_soundings),
+  geometry = sf::st_sfc(mapply(make_footprint, track_x, track_y, SIMPLIFY = FALSE),
+                         crs = 32619)
+)
+
+ggplot() +
+  geom_sf(data = soundings_sf, fill = "skyblue", alpha = 0.35, colour = "grey30") +
+  coord_sf() +
+  labs(title = "Synthetic satellite footprints",
+       subtitle = "Centroids sampled densely in 2D, producing overlap in both directions",
+       x = "Easting (m)", y = "Northing (m)") +
+  theme_vignette()
+```
+
+---
+
+## Step 3: simulate footprint-level observations
+
+```{r simulate-observations}
+average_truth_over_footprint <- function(i) {
+  inside <- sf::st_within(truth_sf, soundings_sf[i, ], sparse = FALSE)[, 1]
+  if (!any(inside)) return(NA_real_)
+  mean(truth_df$truth[inside])
+}
+
+mu   <- vapply(seq_len(n_soundings), average_truth_over_footprint, numeric(1))
+keep <- !is.na(mu)
+soundings_sf <- soundings_sf[keep, ]
+mu   <- mu[keep]
+n_soundings  <- length(mu)
+
+sigma_eps <- 0.15
+y <- mu + rnorm(n_soundings, sd = sigma_eps)
+
+soundings_sf$y  <- y
+soundings_sf$mu <- mu
+
+cat("Usable soundings:", n_soundings, "\n")
+cat("Noise sd:", sigma_eps, "\n")
+```
+
+---
+
+## Step 4: build the SAR-raster design matrix
+
+```{r sar-grid}
+domain_poly <- make_rect_domain(domain_bbox, crs = sf::st_crs(soundings_sf))
+
+sar_grid_sf <- sf::st_sf(
+  cell_id  = seq_along(sf::st_make_grid(domain_poly, n = c(80, 80), square = TRUE)),
+  geometry = sf::st_make_grid(domain_poly, n = c(80, 80), square = TRUE)
+)
+
+n_cells <- nrow(sar_grid_sf)
+delta   <- sqrt(as.numeric(sf::st_area(sar_grid_sf[1, ])))
+cat("SAR raster cells:", n_cells, "(", sqrt(n_cells), "x", sqrt(n_cells), ")\n")
+cat("Cell size (delta):", delta, "m\n")
+cat("Footprint/cell ratio: ~", round(1300/delta, 1), "x", round(2300/delta, 1), "\n")
+```
+
+```{r sar-A}
+A_sar <- compute_overlap_fractions(
+  soundings = soundings_sf,
+  fine_grid = sar_grid_sf,
+  sparse = TRUE
+)
+
+cat("Dimensions of SAR A:", nrow(A_sar), "x", ncol(A_sar), "\n")
+cat("Range of SAR row sums:", range(Matrix::rowSums(A_sar)), "\n")
+```
+
+---
+
+## Step 5: build the SAR prior
+
+```{r sar-prior}
+rho  <- 0.95
+tau2 <- 1.0    # SAR conditional variance -- same parameter for both models
+phi  <- 1.0
+
+cat("SAR parameters: delta =", round(delta,2), " rho =", rho, " tau2 =", tau2, "\n")
+
+Q_sar <- make_sar_precision(grid_sf = sar_grid_sf, rho = rho, tau2 = tau2)
+cat("SAR precision:", nrow(Q_sar), "x", ncol(Q_sar),
+    " nonzeros:", length(Q_sar@x), "\n")
+```
+
+```{r fit-sar}
+fit_sar    <- fit_fastblm(y = y, A = A_sar, Q = Q_sar, phi = phi, solver = "cholesky")
+theta_sar  <- fit_sar$posterior_mean
+fitted_sar <- as.numeric(A_sar %*% theta_sar)
+```
+
+---
+
+## Step 6: build the matched Fourier-SAR design matrix
+
+The Fourier basis here is the **Neumann cosine basis** from the dissertation:
+
+\[
+\phi_{\mathbf{j}}(s)
+= \prod_{k=1}^2 \sqrt{2 - \delta_{j_k,1}}\,
+  \cos\!\big((j_k-1)\pi s_k / L_k\big),
+\qquad j_k \in \{1,\ldots,J\}.
+\]
+
+`J` controls the resolution: `J = 1` gives only the constant; `J = 10` gives up
+to 9 half-waves across the domain in each direction, for \(J^2 = 100\) basis
+functions total.
+
+```{r fourier-frequencies}
+J <- 80
+
+fg <- fourier_freq_grid(J = J, domain_bbox = domain_bbox)
+
+cat("J =", J, "\n")
+cat("Basis functions:", nrow(fg$indices), "= J^2\n")
+cat("Columns in A:", nrow(fg$indices), "(one per basis function, cosine only)\n")
+```
+
+```{r fourier-A}
+A_fourier <- fourier_integrate_basis(polygons_sf = soundings_sf, freq_grid = fg)
+
+cat("Dimensions of Fourier A:", nrow(A_fourier), "x", ncol(A_fourier), "\n")
+```
+
+No columns are dropped — unlike a complex exponential basis, the Neumann cosine
+basis has no redundant zero-sine column.
+
+---
+
+## Step 7: build the matched Fourier-SAR prior
+
+```{r fourier-prior}
+Q_fun_fourier <- fourier_sar_Q_fun(freq_grid = fg, delta = delta)
+
+Q_fourier <- Q_fun_fourier(c(logit_rho = qlogis(rho), log_tau2 = log(tau2)))$Q
+
+cat("Dimensions of Fourier Q:", nrow(Q_fourier), "x", ncol(Q_fourier), "\n")
+
+summarize_prior(Q_fun = Q_fun_fourier,
+                theta = c(logit_rho = qlogis(rho), log_tau2 = log(tau2)))
+```
+
+```{r fit-fourier}
+fit_fourier    <- fit_fastblm(y = y, A = A_fourier, Q = Q_fourier,
+                              phi = phi, solver = "cholesky")
+theta_fourier  <- fit_fourier$posterior_mean
+fitted_fourier <- as.numeric(A_fourier %*% theta_fourier)
+```
+
+---
+
+## Step 8: compare fitted values at the observation scale
+
+```{r compare-observation-scale}
+obs_compare <- data.frame(y = y, truth = mu,
+                          sar = fitted_sar, fourier = fitted_fourier)
+
+knitr::kable(
+  data.frame(
+    model = c("SAR-raster", "Fourier-SAR"),
+    rmse_against_truth = c(rmse(fitted_sar, mu), rmse(fitted_fourier, mu)),
+    rmse_against_y     = c(rmse(fitted_sar, y),  rmse(fitted_fourier, y))
+  ),
+  digits = 4, caption = "Observation-scale comparison."
+)
+```
+
+```{r plot-fitted-comparison}
+ggplot(obs_compare, aes(sar, fourier)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2) +
+  coord_equal() +
+  labs(title = "Fitted footprint means: SAR-raster vs Fourier-SAR",
+       x = "SAR-raster fitted value", y = "Fourier-SAR fitted value") +
+  theme_vignette()
+```
+
+---
+
+## Step 9: compare predictions on a common grid
+
+For the SAR-raster model, the fitted coefficients are the grid-cell predictions
+directly. For the Fourier-SAR model, we evaluate the basis at grid centroids.
+
+```{r prediction-grid}
+pred_pts <- sf::st_centroid(sar_grid_sf)
+pred_xy  <- sf::st_coordinates(pred_pts)
+
+pred_sar     <- as.numeric(theta_sar)
+Phi_fourier  <- fourier_evaluate_basis(coords = pred_xy, freq_grid = fg)
+pred_fourier <- as.numeric(Phi_fourier %*% theta_fourier)
+
+nearest_idx <- FNN::get.knnx(
+  data  = as.matrix(truth_df[, c("x","y")]),
+  query = pred_xy, k = 1
+)$nn.index[, 1]
+
+pred_df <- data.frame(
+  x          = pred_xy[, 1],
+  y          = pred_xy[, 2],
+  truth      = truth_df$truth[nearest_idx],
+  sar        = pred_sar,
+  fourier    = pred_fourier,
+  difference = pred_fourier - pred_sar
+)
+```
+
+```{r plot-predictions}
+ggplot(pred_df, aes(x, y, fill = sar)) +
+  geom_raster() + coord_equal() +
+  labs(title = "SAR-raster posterior mean",
+       x = "Easting (m)", y = "Northing (m)", fill = "mean") +
+  theme_vignette()
+
+ggplot(pred_df, aes(x, y, fill = fourier)) +
+  geom_raster() + coord_equal() +
+  labs(title = "Fourier-SAR posterior mean",
+       x = "Easting (m)", y = "Northing (m)", fill = "mean") +
+  theme_vignette()
+
+ggplot(pred_df, aes(x, y, fill = difference)) +
+  geom_raster() + coord_equal() +
+  labs(title = "Difference: Fourier-SAR minus SAR-raster",
+       x = "Easting (m)", y = "Northing (m)", fill = "diff") +
+  theme_vignette()
+```
+
+```{r prediction-summary}
+knitr::kable(
+  data.frame(
+    model = c("SAR-raster", "Fourier-SAR"),
+    rmse_against_truth = c(rmse(pred_df$sar, pred_df$truth),
+                           rmse(pred_df$fourier, pred_df$truth))
+  ),
+  digits = 4, caption = "Prediction-grid comparison."
+)
+```
+
+---
+
+## Step 10: sensitivity to Fourier truncation
+
+```{r fourier-sensitivity}
+J_values <- c(10, 20, 40, 60, 80)
+
+sens <- lapply(J_values, function(J_now) {
+  fg_now <- fourier_freq_grid(J = J_now, domain_bbox = domain_bbox)
+  A_now  <- fourier_integrate_basis(polygons_sf = soundings_sf, freq_grid = fg_now)
+
+  Q_fun_now <- fourier_sar_Q_fun(freq_grid = fg_now, delta = delta)
+  Q_now     <- Q_fun_now(c(logit_rho = qlogis(rho), log_tau2 = log(tau2)))$Q
+
+  fit_now      <- fit_fastblm(y = y, A = A_now, Q = Q_now,
+                              phi = phi, solver = "cholesky")
+  fitted_now   <- as.numeric(A_now %*% fit_now$posterior_mean)
+
+  data.frame(J              = J_now,
+             n_basis        = ncol(A_now),
+             rmse_vs_truth  = rmse(fitted_now, mu),
+             rmse_vs_sar    = rmse(fitted_now, fitted_sar))
+})
+
+sens_df <- do.call(rbind, sens)
+
+knitr::kable(sens_df, digits = 4,
+             caption = "Sensitivity to the number of basis functions (J^2 total).")
+```
+
+```{r plot-fourier-sensitivity}
+ggplot(sens_df, aes(n_basis, rmse_vs_sar)) +
+  geom_line() + geom_point() +
+  labs(title = "Fourier-SAR approximation stabilizes as J increases",
+       x = "Number of basis functions (J^2)",
+       y = "RMSE against SAR-raster fitted values") +
+  theme_vignette()
+```
+
+---
+
+## Summary
+
+Both models fit the same observation equation \(y = A\theta + \epsilon\). The
+difference is representational: \(\theta\) is grid-cell values in the SAR-raster
+model and Neumann cosine coefficients in the Fourier-SAR model.
+
+The prior translation is direct via the exact discrete-Laplacian correspondence:
+the same \((\rho, \tau^2, \delta)\) that defines the SAR-raster prior also defines
+the Fourier-SAR spectral precision, and both can be read off in the other
+parameterization via `summarize_prior()`.
+
+The Fourier representation's main advantage is that the fitted coefficients can
+be reused for prediction at new points, new grids, or new regions without
+refitting.
+
+```{r debug-dc}
+cat("Mean of y:", mean(y), "\n")
+cat("Mean of SAR fitted:", mean(fitted_sar), "\n")
+cat("Mean of Fourier fitted:", mean(fitted_fourier), "\n")
+cat("Offset (Fourier - SAR):", mean(fitted_fourier) - mean(fitted_sar), "\n\n")
+
+# DC coefficient in each model
+cat("SAR theta[1] (first cell, near DC):", theta_sar[1], "\n")
+cat("Fourier theta for phi_1_1 (DC):", theta_fourier[colnames(A_fourier) == "phi_1_1"], "\n\n")
+
+# Prior variance comparison at non-DC vs DC
+Q_diag <- diag(Q_fourier)
+cat("Fourier DC prior variance:", 1/Q_diag[colnames(A_fourier) == "phi_1_1"], "\n")
+cat("Fourier non-DC prior variance range:", range(1/Q_diag[colnames(A_fourier) != "phi_1_1"]), "\n\n")
+
+# What does the SAR Q give for the constant eigenvector?
+ones <- rep(1, nrow(Q_sar))
+sar_dc_precision <- as.numeric(t(ones) %*% Q_sar %*% ones) / nrow(Q_sar)^2
+cat("SAR effective DC precision (per-cell):", sar_dc_precision, "\n")
+cat("SAR effective DC prior variance:", 1/sar_dc_precision, "\n")
+```

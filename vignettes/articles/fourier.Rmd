@@ -1,0 +1,424 @@
+---
+title: "Exact Fourier Integration over Satellite Footprints"
+description: >
+  A step-by-step walkthrough of fourier_integrate_basis(): visualising
+  soundings, computing the A matrix exactly, verifying the result, and
+  reading off SAR-equivalent parameters.
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Exact Fourier Integration over Satellite Footprints}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  fig.width = 7,
+  fig.height = 4,
+  dpi = 150
+)
+library(spatintegrate)
+library(sf)
+library(ggplot2)
+
+theme_vignette <- function() {
+  theme_minimal(base_size = 11) +
+    theme(panel.border = element_rect(fill = NA, colour = "grey60"))
+}
+```
+
+This vignette walks slowly through what `fourier_integrate_basis()` does and
+why. There is no model fitting here — the goal is just to understand the $A$
+matrix.
+
+---
+
+## The setup
+
+We want to estimate a spatial field $v(s)$ from satellite observations. Each
+satellite sounding observes a **footprint** — a polygon on the ground — and
+returns a single number that is approximately the area-averaged field value over
+that footprint:
+
+$$y_i \approx \frac{1}{|D_i|} \int_{D_i} v(s) \, ds$$
+
+We represent the unknown field $v(s)$ as a linear combination of Fourier basis
+functions:
+
+$$v(s) \approx \sum_k \alpha_k \phi_k(s)$$
+
+Plugging in, each observation becomes a linear function of the coefficients
+$\alpha$:
+
+$$y_i \approx \sum_k \alpha_k \underbrace{\frac{1}{|D_i|} \int_{D_i} \phi_k(s) \, ds}_{A_{ik}}$$
+
+The matrix $A$ is what `fourier_integrate_basis()` computes. Each entry
+$A_{ik}$ is the area-averaged value of basis function $k$ over footprint $i$.
+
+---
+
+## Step 1: make some soundings
+
+We'll simulate a small set of OCO-2-like soundings over a 200km $\times$ 200km
+domain. Each sounding is a small parallelogram (the satellite footprint is
+roughly 1.3km $\times$ 2.3km, slightly tilted along the orbit track).
+
+```{r make-soundings}
+# Helper: one tilted footprint centred at (cx, cy)
+make_footprint <- function(cx, cy, width = 1300, height = 2300, angle_deg = 15) {
+  angle <- angle_deg * pi / 180
+  # Four corners relative to centre, then rotate
+  hw <- width  / 2
+  hh <- height / 2
+  corners <- matrix(c(-hw, -hh,
+                       hw, -hh,
+                       hw,  hh,
+                      -hw,  hh,
+                      -hw, -hh), ncol = 2, byrow = TRUE)
+  rot <- matrix(c(cos(angle), -sin(angle),
+                  sin(angle),  cos(angle)), nrow = 2)
+  rotated <- corners %*% t(rot)
+  rotated[, 1] <- rotated[, 1] + cx
+  rotated[, 2] <- rotated[, 2] + cy
+  sf::st_polygon(list(rotated))
+}
+
+# Simulate a small orbit track: 8 soundings spaced 1.8km apart (footprint
+# height is 2.3km, so consecutive soundings overlap by ~500m)
+set.seed(42)
+n_soundings <- 8
+cx <- 100e3 + seq(0, 0, length.out = n_soundings)
+cy <- 100e3 + seq(0, (n_soundings - 1) * 1800, length.out = n_soundings)
+
+soundings_sf <- sf::st_sf(
+  id       = seq_len(n_soundings),
+  geometry = sf::st_sfc(
+    mapply(make_footprint, cx, cy, SIMPLIFY = FALSE),
+    crs = 32619   # UTM 19N, units = meters
+  )
+)
+```
+
+Let's look at them.
+
+```{r plot-soundings, fig.height = 5}
+# Zoom to the sounding extent with a small buffer
+buf <- 3000   # 3km buffer around the footprints
+bb  <- sf::st_bbox(soundings_sf)
+
+ggplot() +
+  geom_sf(data = soundings_sf, aes(fill = factor(id)), alpha = 0.6,
+          colour = "black", linewidth = 0.5) +
+  scale_fill_brewer(palette = "Blues", guide = "none") +
+  coord_sf(xlim = c(bb["xmin"] - buf, bb["xmax"] + buf),
+           ylim = c(bb["ymin"] - buf, bb["ymax"] + buf)) +
+  labs(title    = "Simulated satellite soundings",
+       subtitle = sprintf("%d footprints, ~1.3km x 2.3km, tilted 15°, spaced 1.8km apart",
+                          n_soundings),
+       x = "Easting (m)", y = "Northing (m)") +
+  theme_vignette()
+```
+
+Consecutive footprints overlap by about 500m — the footprint height is 2.3km
+but they are spaced only 1.8km apart along the orbit track.
+
+---
+
+## Step 2: build the frequency grid
+
+Think of the frequency grid as dividing the domain into $k$ equal strips in
+each direction. If the domain is $L$ meters wide and you want $k$ complete
+cycles of a sinusoid to fit across it, the corresponding spatial period is
+$L/k$ — one full wave every $L/k$ meters. `K = 5` means we include up to 5
+complete cycles across the domain in each direction, so the finest features we
+can represent are $L/5$ wide.
+
+The internal unit is angular frequency $\omega = 2\pi k / L$ (radians per
+meter), which is just $2\pi$ times cycles-per-meter. The two are equivalent;
+the angular form is more convenient for the integration formula.
+
+`fourier_freq_grid()` takes:
+
+- `K` — the maximum number of complete cycles across the domain in each
+  direction. Total frequencies: $(2K+1)^2$ (positive, negative, and zero in
+  each dimension).
+- `domain_bbox` — the bounding box, used to set the period $L_x$ and $L_y$.
+
+```{r freq-grid}
+bbox  <- c(0, 0, 200e3, 200e3)   # xmin, ymin, xmax, ymax in meters
+K     <- 5
+freqs <- fourier_freq_grid(K = K, domain_bbox = bbox)
+
+cat("Domain width: 200 km\n")
+cat("K =", K, "=> finest resolvable feature: 200/5 = 40 km\n")
+cat("Number of frequency pairs:", nrow(freqs), "= (2*5+1)^2\n")
+cat("Columns in A:", 2 * nrow(freqs), "(cos and sin for each frequency)\n")
+cat("\nFrequency grid in cycles per km (k / L):\n")
+Lkm <- 200
+print(head(round(freqs * Lkm / (2 * pi), 3)))   # convert to cycles/km
+```
+
+The `k` column values are just the integer indices $-K, \ldots, K$ — exactly
+the same as dividing the domain into $2K$ equal intervals. Each row is one
+$(k_x, k_y)$ pair, and the corresponding basis functions are
+$\cos(2\pi k_x s_x / L_x) \cos(2\pi k_y s_y / L_y)$ and so on.
+
+```{r plot-freqs, fig.height = 4}
+freqs_df       <- as.data.frame(freqs * 200 / (2 * pi))   # convert to cycles/km
+names(freqs_df) <- c("kx", "ky")
+freqs_df$zero  <- freqs_df$kx == 0 & freqs_df$ky == 0
+
+ggplot(freqs_df, aes(kx, ky)) +
+  geom_point(aes(colour = zero), size = 2.5) +
+  scale_colour_manual(values = c("FALSE" = "#2166ac", "TRUE" = "#d6604d"),
+                      labels = c("non-zero frequency", "zero (constant term)"),
+                      name = NULL) +
+  scale_x_continuous(breaks = -K:K) +
+  scale_y_continuous(breaks = -K:K) +
+  coord_equal() +
+  labs(title    = sprintf("Frequency grid: K = %d, %d pairs total", K, nrow(freqs)),
+       subtitle = "Each point is one (kx, ky) pair — number of cycles across the domain",
+       x = "kx  (cycles across domain in x)",
+       y = "ky  (cycles across domain in y)") +
+  theme_vignette()
+```
+
+The red dot at the origin ($k_x = k_y = 0$) is the constant term. The point
+at $(1, 0)$ is one full wave across the domain in $x$; $(2, 0)$ is two full
+waves; and so on. Negative $k$ values give the sine terms (they are needed
+because $\cos(-\omega s) = \cos(\omega s)$ but $\sin(-\omega s) =
+-\sin(\omega s)$, so both signs are required to span the full basis).
+
+---
+
+## Step 3: compute A
+
+```{r compute-A}
+A <- fourier_integrate_basis(soundings_sf, freqs)
+
+cat("Dimensions of A:", nrow(A), "x", ncol(A), "\n")
+cat("  =", n_soundings, "soundings x", 2 * nrow(freqs), "basis columns\n")
+cat("  (", nrow(freqs), "frequencies x 2 for cos and sin)\n")
+```
+
+Each row of $A$ is one sounding. Each column pair is one frequency — the
+odd-indexed column is the cosine integral, the even-indexed is the sine
+integral.
+
+Let's look at the row corresponding to the zero frequency, which should
+always be 1 (cosine) and 0 (sine):
+
+```{r check-zero-freq}
+zero_row <- which(freqs[, 1] == 0 & freqs[, 2] == 0)
+cos_col  <- 2 * zero_row - 1
+sin_col  <- 2 * zero_row
+
+cat("Zero-frequency column indices: cos =", cos_col, ", sin =", sin_col, "\n\n")
+cat("A[, cos_col] (should be 1 for all soundings):\n")
+print(round(A[, cos_col], 10))
+cat("\nA[, sin_col] (should be 0 for all soundings):\n")
+print(round(A[, sin_col], 10))
+```
+
+Good — the zero-frequency cos column is exactly 1 everywhere, and the sin
+column is exactly 0. This is as expected: the area-average of a constant
+function over any polygon is 1.
+
+---
+
+## Step 4: visualise what A looks like
+
+Each row of $A$ encodes how much of each frequency is "seen" by that sounding.
+Let's look at how a few specific frequencies vary across soundings.
+
+```{r plot-A-rows, fig.height = 5}
+# Pick a low-frequency and a higher-frequency row
+# Lowest nonzero x-frequency: omega_x = 2*pi/200km
+low_freq_row  <- which(freqs[, 1] == min(freqs[freqs[, 1] > 0, 1]) &
+                         freqs[, 2] == 0)
+# A mid-frequency
+mid_freq_row  <- which(freqs[, 1] == 0 &
+                         freqs[, 2] == sort(unique(freqs[freqs[,2]>0, 2]))[3])
+
+sounding_centroids <- sf::st_coordinates(sf::st_centroid(soundings_sf))
+
+plot_df <- data.frame(
+  sounding  = seq_len(n_soundings),
+  northing  = sounding_centroids[, 2] / 1e3,
+  low_cos   = A[, 2 * low_freq_row - 1],
+  low_sin   = A[, 2 * low_freq_row],
+  mid_cos   = A[, 2 * mid_freq_row - 1],
+  mid_sin   = A[, 2 * mid_freq_row]
+)
+
+p1 <- ggplot(plot_df, aes(y = northing)) +
+  geom_line(aes(x = low_cos, colour = "cos"), linewidth = 0.8) +
+  geom_line(aes(x = low_sin, colour = "sin"), linewidth = 0.8) +
+  geom_point(aes(x = low_cos, colour = "cos"), size = 2) +
+  geom_point(aes(x = low_sin, colour = "sin"), size = 2) +
+  scale_colour_manual(values = c(cos = "#2166ac", sin = "#d6604d"), name = NULL) +
+  labs(title = "Low y-frequency", x = "A value", y = "Sounding northing (km)") +
+  theme_vignette()
+
+p2 <- ggplot(plot_df, aes(y = northing)) +
+  geom_line(aes(x = mid_cos, colour = "cos"), linewidth = 0.8) +
+  geom_line(aes(x = mid_sin, colour = "sin"), linewidth = 0.8) +
+  geom_point(aes(x = mid_cos, colour = "cos"), size = 2) +
+  geom_point(aes(x = mid_sin, colour = "sin"), size = 2) +
+  scale_colour_manual(values = c(cos = "#2166ac", sin = "#d6604d"), name = NULL) +
+  labs(title = "Mid y-frequency", x = "A value", y = "Sounding northing (km)") +
+  theme_vignette()
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+The low-frequency column varies slowly along the orbit track (smoothly across
+soundings). The higher-frequency column oscillates faster. This is exactly what
+you'd expect: the $A$ matrix encodes how much of each spatial frequency each
+sounding "sees", and high-frequency basis functions oscillate rapidly in space.
+
+---
+
+## Step 5: verify by brute-force numerical integration
+
+The integrals are exact analytically, but it's worth checking against a dense
+numerical grid for a few soundings and a few frequencies.
+
+```{r verify}
+# For each sounding, compare A values against a dense grid mean
+verify_one <- function(i, freq_row, N = 500) {
+  # Bounding box of sounding i
+  bb  <- sf::st_bbox(soundings_sf[i, ])
+  xs  <- seq(bb["xmin"], bb["xmax"], length.out = N)
+  ys  <- seq(bb["ymin"], bb["ymax"], length.out = N)
+  grd <- expand.grid(x = xs, y = ys)
+
+  # Keep only points inside the footprint
+  pts_sfc <- sf::st_as_sf(grd, coords = c("x", "y"), crs = 32619)
+  inside  <- as.vector(sf::st_within(pts_sfc, soundings_sf[i, ], sparse = FALSE))
+  if (sum(inside) == 0) return(c(cos_brute = NA, sin_brute = NA))
+
+  pts_in <- as.matrix(grd[inside, ])
+  wx <- freqs[freq_row, 1]
+  wy <- freqs[freq_row, 2]
+  phase <- pts_in[, 1] * wx + pts_in[, 2] * wy
+  c(cos_brute = mean(cos(phase)),
+    sin_brute = mean(sin(phase)))
+}
+
+# Check a low and a mid frequency for all soundings
+check_freq <- low_freq_row
+
+brute <- t(sapply(seq_len(n_soundings), verify_one, freq_row = check_freq))
+
+verify_df <- data.frame(
+  sounding  = seq_len(n_soundings),
+  cos_exact = round(A[, 2 * check_freq - 1], 6),
+  cos_brute = round(brute[, "cos_brute"],    6),
+  sin_exact = round(A[, 2 * check_freq],     6),
+  sin_brute = round(brute[, "sin_brute"],    6)
+)
+verify_df$cos_error <- abs(verify_df$cos_exact - verify_df$cos_brute)
+verify_df$sin_error <- abs(verify_df$sin_exact - verify_df$sin_brute)
+
+knitr::kable(verify_df,
+             caption = paste("Exact vs brute-force grid (N=500) for frequency",
+                             check_freq),
+             digits = 6)
+```
+
+The errors are at the level of the brute-force grid's own discretization error
+($\sim 1/N$), not from the exact integration — the analytic formula is exact up
+to floating-point precision.
+
+---
+
+## Step 6: SAR-equivalent parameters
+
+The Fourier basis is most useful when it approximates a SAR or Matérn field.
+`fourier_prior.R` provides `matern_to_sar()` and `sar_to_matern()` to convert
+between the two parameterizations, using the exact correspondence between the
+discrete Laplacian and the SPDE $(\kappa^2 - \Delta)u = \mathcal{W}$.
+
+Suppose we want a prior that matches a SAR model on a 5km grid with $\rho =
+0.95$:
+
+```{r sar-to-matern}
+delta <- 5000   # 5km grid spacing in meters
+rho   <- 0.95
+tau2  <- 1e6    # some scale
+
+matern_equiv <- sar_to_matern(rho = rho, tau2 = tau2, delta = delta)
+
+cat("SAR parameters:\n")
+cat("  rho   =", rho, "\n")
+cat("  tau2  =", tau2, "\n")
+cat("  delta =", delta, "m\n\n")
+cat("Equivalent Matern(nu=1) parameters:\n")
+cat("  range  =", round(matern_equiv$range / 1e3, 2), "km\n")
+cat("  sigma2 =", round(matern_equiv$sigma2, 4), "\n")
+```
+
+And in the other direction — given a fitted Matérn range, what SAR parameters
+does it correspond to on a 5km grid?
+
+```{r matern-to-sar}
+range  <- 80e3   # 80km range
+sigma2 <- 2.0
+
+sar_equiv <- matern_to_sar(range = range, sigma2 = sigma2, delta = delta)
+
+cat("Matern(nu=1) parameters:\n")
+cat("  range  =", range / 1e3, "km\n")
+cat("  sigma2 =", sigma2, "\n\n")
+cat("Equivalent SAR parameters (delta =", delta / 1e3, "km):\n")
+cat("  rho  =", round(sar_equiv$rho,  4), "\n")
+cat("  tau2 =", round(sar_equiv$tau2, 4), "\n")
+```
+
+Let's verify the round-trip:
+
+```{r round-trip}
+back <- sar_to_matern(sar_equiv$rho, sar_equiv$tau2, delta)
+
+cat("Round-trip check:\n")
+cat("  range  : ", range / 1e3,  "km  ->  rho =", round(sar_equiv$rho, 4),
+    "  ->  range:", round(back$range / 1e3, 4), "km\n")
+cat("  sigma2 :", sigma2, "  ->  tau2 =", round(sar_equiv$tau2, 2),
+    "  ->  sigma2:", round(back$sigma2, 6), "\n")
+```
+
+Exact round-trip, as expected from the algebraic derivation.
+
+---
+
+## Summary
+
+Here is the complete workflow in one block:
+
+```{r summary-block, eval = FALSE}
+library(spatintegrate)
+library(sf)
+
+# 1. Your soundings as an sf object in a projected CRS
+soundings_sf <- ...   # sf object, one row per footprint
+
+# 2. Choose a domain and frequency resolution
+bbox  <- c(xmin, ymin, xmax, ymax)   # in CRS units (meters)
+freqs <- fourier_freq_grid(K = 10, domain_bbox = bbox)
+
+# 3. Compute the A matrix — exact, no quadrature error
+A <- fourier_integrate_basis(soundings_sf, freqs)
+# A is n_soundings x 2*nrow(freqs)
+# column pairs: (cos_f1, sin_f1, cos_f2, sin_f2, ...)
+
+# 4. Interpret SAR <-> Matern parameters
+matern_to_sar(range = 80e3, sigma2 = 2, delta = 5000)
+sar_to_matern(rho   = 0.95, tau2   = 1e6, delta = 5000)
+```
+
+The $A$ matrix is the input to `fastblm` for model fitting. The prior $Q$ is
+constructed separately via `fourier_matern_Q_fun()` or `fourier_sar_Q_fun()`,
+which are covered in the modeling vignette.

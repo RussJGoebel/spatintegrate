@@ -1,0 +1,332 @@
+---
+title: "SAR and Fourier-SAR are the same model"
+date: 2026-05-16
+description: "Tune a SAR model, translate the parameters, and get a Fourier model that predicts at any resolution — for free."
+categories: [spatial statistics, downscaling, bayesian, tutorial]
+---
+
+Suppose you have satellite footprints over a region. Each one returns a noisy
+average of the underlying field — XCO₂, SIF, land surface temperature — over an
+irregular polygon. You want to infer the field at fine resolution.
+
+This post shows two ways to do it. The first is a SAR-raster model — fast to
+tune, familiar parameters. The second is a Fourier-SAR model — same prior,
+same fit quality, but predicts at *any* resolution from a single set of
+coefficients. The key is that the parameters translate exactly, so you only
+need to tune once.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE, comment = "#>",
+  fig.width = 7, fig.height = 4.5, dpi = 150,
+  message = FALSE, warning = FALSE
+)
+library(spatintegrate)
+library(fastblm)
+library(sf)
+library(Matrix)
+library(spdep)
+library(ggplot2)
+library(future)
+library(future.apply)
+
+theme_post <- function()
+  theme_minimal(base_size = 12) +
+  theme(panel.border = element_rect(fill = NA, colour = "grey70"))
+```
+
+## Setup: simulate from a known Matérn field
+
+We simulate a latent field from a Matérn(ν=1) process with known parameters,
+then generate footprint-averaged observations. This lets us check whether the
+fitted model recovers the true parameters.
+
+True parameters: **range = 3 km**, **σ² = 1**, **observation noise σ_ε = 0.15**.
+
+```{r make-data}
+set.seed(42)
+domain_bbox <- c(0, 0, 10e3, 10e3)
+
+# Fine grid for truth
+grid_n <- 80
+gx     <- seq(0, 10e3, length.out = grid_n)
+xy     <- expand.grid(x = gx, y = gx)
+
+range_true  <- 3e3/3
+sigma2_true <- 1.0
+sigma_e     <- 0.15
+kappa_true  <- sqrt(8) / range_true   # nu=1 convention
+
+# Matern(nu=1): C(d) = sigma2 * (1 + kappa*d) * exp(-kappa*d)
+D   <- as.matrix(dist(as.matrix(xy)))
+Cov <- sigma2_true * (1 + kappa_true*D) * exp(-kappa_true*D)
+L   <- chol(Cov + diag(1e-8, nrow(Cov)))
+set.seed(7)
+xy$truth <- as.numeric(crossprod(L, rnorm(nrow(xy))))
+
+# True rho at the SAR grid spacing (80x80 on 10km -> delta=125m)
+delta_sar <- 10e3 / 80
+kappa2_true <- kappa_true^2
+rho_true  <- (4/delta_sar^2) / (kappa2_true + 4/delta_sar^2)
+cat(sprintf("True parameters: range=%.0f m, sigma2=%.1f, sigma_e=%.2f\n",
+            range_true, sigma2_true, sigma_e))
+cat(sprintf("Implied rho at delta=%.0f m: %.4f\n", delta_sar, rho_true))
+```
+
+```{r make-obs}
+make_footprint <- function(cx, cy, w=1300, h=2300, deg=15) {
+  a <- deg*pi/180
+  R <- matrix(c(cos(a),-sin(a),sin(a),cos(a)), 2)
+  v <- matrix(c(-w/2,-h/2,w/2,-h/2,w/2,h/2,-w/2,h/2,-w/2,-h/2),
+              ncol=2, byrow=TRUE) %*% t(R)
+  v[,1] <- v[,1]+cx; v[,2] <- v[,2]+cy
+  sf::st_polygon(list(v))
+}
+
+n_obs  <- 250
+cx     <- runif(n_obs, 2.5e3, 7.5e3)
+cy     <- runif(n_obs, 2.5e3, 7.5e3)
+fps_sf <- sf::st_sf(
+  id       = seq_len(n_obs),
+  geometry = sf::st_sfc(mapply(make_footprint, cx, cy, SIMPLIFY=FALSE), crs=32619)
+)
+truth_sf <- sf::st_as_sf(xy, coords=c("x","y"), crs=32619)
+mu <- vapply(seq_len(n_obs), function(i) {
+  ins <- sf::st_within(truth_sf, fps_sf[i,], sparse=FALSE)[,1]
+  if (!any(ins)) NA_real_ else mean(xy$truth[ins])
+}, numeric(1))
+keep  <- !is.na(mu)
+fps_sf <- fps_sf[keep,]; mu <- mu[keep]
+y     <- mu + rnorm(sum(keep), sd=sigma_e)
+n_obs <- length(y)
+cat(sprintf("%d soundings, SNR = %.1f\n", n_obs, sd(mu)/sigma_e))
+```
+
+```{r plot-data, fig.height=4}
+ggplot() +
+  geom_raster(data=xy, aes(x, y, fill=truth)) +
+  geom_sf(data=fps_sf, fill=NA, colour="white", linewidth=0.3, alpha=0.5) +
+  scale_fill_distiller(palette="RdYlBu") +
+  labs(title=sprintf("Matérn field (range=%.0f km) with %d footprints",
+                     range_true/1e3, n_obs),
+       x="Easting (m)", y="Northing (m)", fill="v(s)") +
+  coord_sf() + theme_post()
+```
+
+## Model 1: SAR-raster
+
+The SAR model treats the latent field as grid cell values with a rook-neighbor
+prior. $W$ uses Neumann-reflection boundary conditions — boundary cells reflect
+onto themselves, making $W$ symmetric with the Neumann cosine functions as its
+exact eigenvectors.
+
+```{r sar-setup}
+domain_poly <- sf::st_as_sfc(
+  sf::st_bbox(setNames(domain_bbox, c("xmin","ymin","xmax","ymax")), crs=32619))
+sar_grid_sf <- sf::st_sf(
+  cell_id  = seq_along(sf::st_make_grid(domain_poly, n=c(80,80))),
+  geometry = sf::st_make_grid(domain_poly, n=c(80,80))
+)
+delta   <- sqrt(as.numeric(sf::st_area(sar_grid_sf[1,])))
+n_cells <- nrow(sar_grid_sf)
+cat(sprintf("Grid: 80x80 = %d cells, delta = %.0f m\n", n_cells, delta))
+
+make_rook_W <- function(grid_sf) {
+  nb       <- spdep::poly2nb(grid_sf, queen=FALSE)
+  n        <- length(nb)
+  i_o      <- rep(seq_len(n), lengths(nb))
+  j_o      <- unlist(nb, use.names=FALSE)
+  n_nb     <- lengths(nb)
+  diag_idx <- which(n_nb < 4L)
+  Matrix::sparseMatrix(
+    i = c(i_o, diag_idx), j = c(j_o, diag_idx),
+    x = c(rep(1/4, length(i_o)), (4L-n_nb[diag_idx])/4),
+    dims = c(n, n)
+  )
+}
+make_sar_Q <- function(grid_sf, rho) {
+  W <- make_rook_W(grid_sf)
+  Matrix::crossprod(Matrix::Diagonal(nrow(W)) - rho*W)
+}
+
+A_sar <- compute_overlap_fractions(soundings=fps_sf, fine_grid=sar_grid_sf, sparse=TRUE)
+cat("A_SAR:", nrow(A_sar), "x", ncol(A_sar), "\n")
+```
+
+```{r sar-tune, cache=TRUE}
+future::plan(future::multisession, workers=5L)
+
+Q_fun_sar <- function(theta) {
+  rho <- plogis(theta[["logit_rho"]])
+  Q   <- make_sar_Q(sar_grid_sf, rho)
+  list(Q=Q, Q_inv=function(v) as.numeric(Matrix::solve(Q, v)))
+}
+
+fit_sar_cv <- tune_cv(
+  y=y, A=A_sar, Q_fun=Q_fun_sar,
+  theta_init = c(logit_rho=qlogis(0.95)),
+  lower      = c(logit_rho=qlogis(0.5)),
+  upper      = c(logit_rho=qlogis(0.999)),
+  k=5L, solver="woodbury", parallel=TRUE, verbose=TRUE
+)
+rho_hat <- plogis(fit_sar_cv$theta[["logit_rho"]])
+phi_hat <- fit_sar_cv$phi
+cat(sprintf("Tuned:  rho = %.4f,  phi = %.3g\n", rho_hat, phi_hat))
+```
+
+### Did we recover the true parameters?
+
+We can translate the fitted $\rho$ back to an effective Matérn range using
+the exact correspondence:
+
+$$\kappa^2 = \frac{4(1-\rho)}{\rho\,\delta^2}, \qquad
+\text{range} = \sqrt{8}/\kappa$$
+
+```{r param-recovery}
+kappa2_hat <- 4*(1-rho_hat) / (rho_hat * delta^2)
+range_hat  <- sqrt(8/kappa2_hat)
+
+cat(sprintf("True range:   %.0f m  (rho = %.4f)\n", range_true, rho_true))
+cat(sprintf("Fitted range: %.0f m  (rho = %.4f)\n", range_hat,  rho_hat))
+cat(sprintf("Error: %.0f m (%.0f%%)\n",
+            abs(range_hat-range_true), 100*abs(range_hat-range_true)/range_true))
+```
+
+```{r sar-fit}
+Q_sar      <- make_sar_Q(sar_grid_sf, rho_hat)
+Q_inv_sar  <- function(v) as.numeric(Matrix::solve(Q_sar, v))
+fit_sar    <- fit_fastblm(y, A_sar, Q_sar, phi=phi_hat,
+                          solver="woodbury", Q_inv=Q_inv_sar)
+fitted_sar <- as.numeric(A_sar %*% fit_sar$posterior_mean)
+```
+
+## Model 2: Fourier-SAR
+
+Using the SAR-tuned $\rho$, we build a Fourier model with the same implied
+prior. Rather than fixing $J$ in advance, we add frequencies until the fitted
+footprint means stop changing — using the minimum number needed.
+
+```{r fourier-iterate, cache=TRUE}
+fourier_fit_J <- function(J) {
+  fg_now    <- fourier_freq_grid(J=J, domain_bbox=domain_bbox)
+  A_now     <- fourier_integrate_basis(fps_sf, fg_now)
+  Q_now     <- fourier_sar_Q_fun(freq_grid=fg_now, delta=delta)(
+    c(logit_rho=qlogis(rho_hat), log_tau2=log(1))
+  )$Q
+  Q_inv_now <- Matrix::Diagonal(x=1/Matrix::diag(Q_now))
+  fit_now   <- fit_fastblm(y, A_now, Q_now, phi=phi_hat,
+                           solver="woodbury", Q_inv=Q_inv_now)
+  list(J=J, fg=fg_now, A=A_now, fit=fit_now,
+       fitted=as.numeric(A_now %*% fit_now$posterior_mean))
+}
+
+tol   <- 0.005
+J_seq <- c(10, 20, 40, 60, 80)
+
+prev  <- fourier_fit_J(J_seq[1])
+log_df <- data.frame(J=J_seq[1], n_basis=J_seq[1]^2,
+                     rmse_change=NA_real_, stable=FALSE)
+final <- prev
+
+for (J_now in J_seq[-1]) {
+  curr        <- fourier_fit_J(J_now)
+  rmse_change <- sqrt(mean((curr$fitted - prev$fitted)^2))
+  stable      <- rmse_change < tol
+  log_df <- rbind(log_df,
+    data.frame(J=J_now, n_basis=J_now^2,
+               rmse_change=round(rmse_change,5), stable=stable))
+  cat(sprintf("J=%2d (%4d basis): RMSE change = %.4f  %s\n",
+              J_now, J_now^2, rmse_change,
+              if(stable) "<-- stable, stopping" else ""))
+  final <- curr
+  prev  <- curr
+  if (stable) break
+}
+
+cat(sprintf("\nFinal J = %d  (%d basis functions)\n", final$J, final$J^2))
+```
+
+```{r plot-stability}
+knitr::kable(log_df, digits=4,
+             caption="RMSE change in fitted footprint means as J increases")
+
+ggplot(log_df[-1,], aes(n_basis, rmse_change)) +
+  geom_line(colour="steelblue") +
+  geom_point(aes(colour=stable), size=3) +
+  geom_hline(yintercept=tol, linetype=2, colour="grey50") +
+  scale_colour_manual(values=c("FALSE"="steelblue","TRUE"="firebrick"),
+                      labels=c("not stable","stable"), name=NULL) +
+  labs(title="Adding basis functions until predictions stabilise",
+       subtitle=sprintf("Tolerance = %.3f; stopped at J = %d", tol, final$J),
+       x="Number of basis functions (J²)",
+       y="RMSE change vs previous J") +
+  theme_post()
+```
+
+### Agreement with SAR
+
+```{r plot-agreement}
+df <- data.frame(sar=fitted_sar, fourier=final$fitted)
+ggplot(df, aes(sar, fourier)) +
+  geom_point(alpha=0.5, size=1.5) +
+  geom_abline(slope=1, intercept=0, linetype=2, colour="steelblue") +
+  coord_equal() +
+  labs(title="Fitted footprint means: SAR-raster vs Fourier-SAR",
+       subtitle=sprintf("J=%d, rho=%.4f, phi=%.2f — near-identical fits",
+                        final$J, rho_hat, phi_hat),
+       x="SAR-raster", y="Fourier-SAR") +
+  theme_post()
+```
+
+## What you gain: prediction at any resolution
+
+```{r fourier-predict, fig.height=8}
+fourier_evaluate <- function(coords, fg) {
+  ox <- fg$omega_mat[,1]; oy <- fg$omega_mat[,2]; nc <- fg$norm_const
+  sx <- as.matrix(coords)[,1]; sy <- as.matrix(coords)[,2]
+  sweep(cos(outer(sx,ox)) * cos(outer(sy,oy)), 2, nc, `*`)
+}
+
+grids <- list(
+  "Coarse (40×40)"  = expand.grid(x=seq(0,10e3,length.out=40),
+                                   y=seq(0,10e3,length.out=40)),
+  "Medium (80×80)"  = expand.grid(x=seq(0,10e3,length.out=80),
+                                   y=seq(0,10e3,length.out=80)),
+  "Fine (200×200)"  = expand.grid(x=seq(0,10e3,length.out=200),
+                                   y=seq(0,10e3,length.out=200))
+)
+
+pred_df <- do.call(rbind, Map(function(nm, g) {
+  Phi <- fourier_evaluate(g, final$fg)
+  cbind(g, pred=as.numeric(Phi %*% final$fit$posterior_mean), res=nm)
+}, names(grids), grids))
+
+ggplot(pred_df, aes(x, y, fill=pred)) +
+  geom_raster() +
+  facet_wrap(~res, ncol=1) +
+  scale_fill_distiller(palette="RdYlBu") +
+  coord_equal() +
+  labs(title="Fourier-SAR posterior mean at three resolutions",
+       subtitle="Same fitted coefficients — no refitting",
+       x="Easting (m)", y="Northing (m)", fill="v̂(s)") +
+  theme_post()
+
+```
+
+The SAR model is tied to the 80×80 grid it was fitted on. The Fourier model
+uses `r final$J^2` coefficients and predicts anywhere by evaluating basis
+functions — no refitting for each new resolution.
+
+## Summary
+
+| | SAR-raster | Fourier-SAR |
+|---|---|---|
+| **Parameters** | $\rho$, $\phi$ | Same $\rho$, $\phi$ (translated) |
+| **A matrix** | Sparse overlap fractions | Dense cosine integrals |
+| **Q matrix** | Sparse banded | Diagonal |
+| **Tuning** | CV over $\rho$ | Not needed — use SAR result |
+| **Basis count** | Fixed (grid cells) | Adaptive — add until stable |
+| **Prediction at new resolution** | Rebuild grid and refit | Evaluate basis, instant |
+
+Tune the SAR, verify the recovered range against prior beliefs, translate to
+Fourier, add basis functions until stable, then predict anywhere.

@@ -1,0 +1,324 @@
+---
+title: "Layer 2: Polygon Triangulation"
+description: >
+  How spatintegrate decomposes polygons into triangles for QMC integration —
+  covering triangulate_sf(), get_triangle_coords(), and the CRS requirement.
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Layer 2: Polygon Triangulation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse   = TRUE,
+  comment    = "#>",
+  fig.width  = 7,
+  fig.height = 4,
+  dpi        = 150
+)
+library(spatintegrate)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+
+# Projected CRS used throughout (UTM zone 19N, Boston area)
+TEST_CRS <- 32619
+
+theme_article <- function() {
+  theme_minimal(base_size = 11) +
+    theme(
+      panel.border    = element_rect(fill = NA, colour = "grey60"),
+      legend.position = "none"
+    )
+}
+
+polygon_to_df <- function(sfc) {
+  coords <- sf::st_coordinates(sfc)
+  data.frame(x = coords[, "X"], y = coords[, "Y"])
+}
+
+triangles_to_df <- function(tris) {
+  do.call(bind_rows, lapply(seq_along(tris), function(i) {
+    coords <- sf::st_coordinates(tris[i])
+    data.frame(x = coords[, "X"], y = coords[, "Y"], tri = factor(i))
+  }))
+}
+```
+
+Layer 2 of `spatintegrate` handles geometry preparation: turning polygons into
+triangles that Layer 1 can map QMC points into. Two functions:
+
+- `triangulate_sf(x)` — decompose a polygon into interior triangles
+- `get_triangle_coords(x)` — extract a 3×2 coordinate matrix from a triangle
+
+---
+
+## The CRS requirement
+
+**All inputs must be in a projected CRS.** This is a hard requirement, not a
+convenience. The barycentric mapping in `map_unit_square_to_triangle()` is
+purely Euclidean — it treats coordinates as flat (x, y) pairs. In a geographic
+CRS (lon/lat), a degree of longitude is not the same physical distance as a
+degree of latitude, and both vary with position. The mapping would produce
+points that are uniform in degree-space but not in physical space, silently
+biasing your integrals.
+
+```{r crs-error}
+poly_geo <- sf::st_sfc(
+  sf::st_polygon(list(matrix(c(0,0,1,0,1,1,0,1,0,0), ncol = 2, byrow = TRUE))),
+  crs = 4326
+)
+tryCatch(
+  triangulate_sf(poly_geo),
+  error = function(e) cat("Error:", conditionMessage(e), "\n")
+)
+```
+
+Use `ensure_projected()` to convert before calling:
+
+```{r ensure-projected, eval = FALSE}
+poly_proj <- ensure_projected(poly_geo)
+tris      <- triangulate_sf(poly_proj)
+```
+
+All examples below use UTM zone 19N (EPSG:32619) — projected, in meters.
+
+---
+
+## 1. `triangulate_sf()`
+
+### How it works
+
+`triangulate_sf()` uses **constrained Delaunay triangulation** when GEOS ≥ 3.10
+is available (the default on current installations). Constrained triangulation
+respects polygon boundary edges — triangles cannot cross the boundary, so all
+output triangles are interior by construction with no post-processing needed.
+
+```{r geos-version}
+geos_ver <- sf::sf_extSoftVersion()[["GEOS"]]
+cat("GEOS version:", geos_ver, "\n")
+cat("Using constrained triangulation:",
+    utils::compareVersion(geos_ver, "3.10.0") >= 0, "\n")
+```
+
+On older GEOS installations the function falls back to unconstrained Delaunay
+plus a centroid filter — see the quality note at the end.
+
+### Convex polygons
+
+A convex polygon with $n$ vertices produces $n - 2$ triangles.
+
+```{r convex, fig.height = 4}
+para <- sf::st_sfc(sf::st_polygon(list(matrix(
+  c(0,0, 3,0, 3.5,2, 0.5,2, 0,0), ncol = 2, byrow = TRUE
+))), crs = TEST_CRS)
+
+tris <- triangulate_sf(para)
+cat("Triangles:", length(tris), "\n")
+
+p1 <- ggplot() +
+  geom_polygon(data = polygon_to_df(para), aes(x, y),
+               fill = "#2166ac", alpha = 0.15,
+               colour = "black", linewidth = 0.8) +
+  coord_equal() +
+  labs(title = "Parallelogram", x = NULL, y = NULL) +
+  theme_article()
+
+p2 <- ggplot() +
+  geom_polygon(data = triangles_to_df(tris),
+               aes(x, y, fill = tri, group = tri),
+               alpha = 0.3, colour = "black", linewidth = 0.6) +
+  scale_fill_manual(values = c("#2166ac", "#d6604d")) +
+  coord_equal() +
+  labs(title = "2 interior triangles", x = NULL, y = NULL) +
+  theme_article()
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+### Non-convex polygons
+
+This is where the constrained vs unconstrained distinction matters. Unconstrained
+Delaunay triangulation fills concave regions with exterior triangles —
+`triangulate_sf()` avoids this by using constrained triangulation.
+
+```{r nonconvex, fig.height = 4}
+l_shape <- sf::st_sfc(sf::st_polygon(list(matrix(
+  c(0,0, 3,0, 3,1, 1,1, 1,3, 0,3, 0,0), ncol = 2, byrow = TRUE
+))), crs = TEST_CRS)
+
+# Unconstrained: fills the concave notch with exterior triangles
+tris_unconstrained <- sf::st_triangulate(l_shape) |>
+  sf::st_collection_extract("POLYGON") |>
+  sf::st_cast("POLYGON")
+
+# triangulate_sf: interior triangles only
+tris_constrained <- triangulate_sf(l_shape)
+
+cat("Unconstrained triangles:", length(tris_unconstrained), "\n")
+cat("triangulate_sf result: ", length(tris_constrained),   "\n")
+
+poly_df <- polygon_to_df(l_shape)
+
+p_unc <- ggplot() +
+  geom_polygon(data = poly_df, aes(x, y),
+               fill = NA, colour = "black", linewidth = 0.9) +
+  geom_polygon(data = triangles_to_df(tris_unconstrained),
+               aes(x, y, fill = tri, group = tri),
+               alpha = 0.25, colour = "grey40", linewidth = 0.4) +
+  coord_equal() +
+  labs(title    = "Unconstrained Delaunay",
+       subtitle = paste(length(tris_unconstrained), "triangles — includes exterior"),
+       x = NULL, y = NULL) +
+  theme_article()
+
+p_con <- ggplot() +
+  geom_polygon(data = poly_df, aes(x, y),
+               fill = NA, colour = "black", linewidth = 0.9) +
+  geom_polygon(data = triangles_to_df(tris_constrained),
+               aes(x, y, fill = tri, group = tri),
+               alpha = 0.25, colour = "grey40", linewidth = 0.4) +
+  coord_equal() +
+  labs(title    = "triangulate_sf()",
+       subtitle = paste(length(tris_constrained), "triangles — interior only"),
+       x = NULL, y = NULL) +
+  theme_article()
+
+grid.arrange(p_unc, p_con, ncol = 2)
+```
+
+The constrained result covers exactly the polygon interior — verified by area:
+
+```{r area-check}
+area_poly <- as.numeric(sf::st_area(l_shape))
+area_tris <- sum(as.numeric(sf::st_area(tris_constrained)))
+cat("Polygon area:  ", round(area_poly, 4), "\n")
+cat("Triangles area:", round(area_tris, 4), "\n")
+cat("Match:", isTRUE(all.equal(area_poly, area_tris, tolerance = 1e-6)), "\n")
+```
+
+### Multipolygons
+
+MULTIPOLYGON inputs are cast to individual polygons first, then each is
+triangulated.
+
+```{r multipolygon}
+two_sq <- sf::st_sfc(sf::st_multipolygon(list(
+  list(matrix(c(0,0,1,0,1,1,0,1,0,0), ncol=2, byrow=TRUE)),
+  list(matrix(c(3,0,4,0,4,1,3,1,3,0), ncol=2, byrow=TRUE))
+)), crs = TEST_CRS)
+
+tris_mp <- triangulate_sf(two_sq)
+cat("Two unit squares →", length(tris_mp), "triangles\n")  # 4
+```
+
+### The `min_area` argument
+
+Floating-point slivers from `sf::st_intersection()` occasionally produce
+near-zero-area triangles. Drop them with `min_area` (in CRS units²):
+
+```{r min-area, eval = FALSE}
+# Drop triangles smaller than 1 m² (for a UTM projection in meters)
+tris <- triangulate_sf(intersection_piece, min_area = 1)
+```
+
+The default `min_area = 0` drops only exactly-zero-area triangles.
+
+---
+
+## 2. `get_triangle_coords()`
+
+Given a single triangle sfg or length-1 sfc, returns the three vertex
+coordinates as a 3×2 matrix — ready to pass to `map_unit_square_to_triangle()`.
+
+```{r get-coords}
+tris   <- triangulate_sf(l_shape)
+coords <- get_triangle_coords(tris[[1]])
+
+cat("Dim:", dim(coords), "\n")
+print(coords)
+```
+
+sf repeats the first vertex to close the polygon ring — `get_triangle_coords()`
+strips that duplicate so you always get exactly 3 rows.
+
+---
+
+## Putting it together: Layer 1 + Layer 2
+
+The composition: triangulate with Layer 2, map QMC points with Layer 1.
+This is the per-triangle loop that `integrate_one_sounding()` (Layer 4)
+will use.
+
+```{r end-to-end, fig.height = 4.5}
+# A strongly concave C-shape
+c_shape <- sf::st_sfc(sf::st_polygon(list(matrix(
+  c(0,0, 4,0, 4,1, 1,1, 1,3, 4,3, 4,4, 0,4, 0,0),
+  ncol = 2, byrow = TRUE
+))), crs = TEST_CRS)
+
+tris <- triangulate_sf(c_shape)
+qmc  <- generate_qmc_unit_square(32)   # generated once, reused per triangle
+
+samples <- do.call(bind_rows, lapply(seq_along(tris), function(i) {
+  pts <- map_unit_square_to_triangle(qmc, get_triangle_coords(tris[[i]]))
+  data.frame(x = pts[,1], y = pts[,2], tri = factor(i))
+}))
+
+p_tris <- ggplot() +
+  geom_polygon(data = polygon_to_df(c_shape), aes(x, y),
+               fill = NA, colour = "black", linewidth = 0.9) +
+  geom_polygon(data = triangles_to_df(tris),
+               aes(x, y, fill = tri, group = tri),
+               alpha = 0.2, colour = "grey50", linewidth = 0.4) +
+  coord_equal() +
+  labs(title    = "C-shape triangulated",
+       subtitle = paste(length(tris), "interior triangles"),
+       x = NULL, y = NULL) +
+  theme_article()
+
+p_samp <- ggplot() +
+  geom_polygon(data = polygon_to_df(c_shape), aes(x, y),
+               fill = NA, colour = "black",
+               linewidth = 0.5, linetype = "dashed") +
+  geom_point(data = samples, aes(x, y, colour = tri),
+             size = 1.3, alpha = 0.8) +
+  coord_equal() +
+  labs(title    = "32 QMC points per triangle",
+       subtitle = paste(nrow(samples), "total"),
+       x = NULL, y = NULL) +
+  theme_article()
+
+grid.arrange(p_tris, p_samp, ncol = 2)
+```
+
+All points fall inside the C-shape — none in the concave notch. Each triangle
+gets exactly 32 points regardless of its size: density is controlled by
+triangulation fineness, not by a sampling budget.
+
+---
+
+## Quality note
+
+Both constrained and unconstrained Delaunay triangulation **maximise the
+minimum angle** across all triangles — the provably optimal shape quality from
+a fixed vertex set. Thin sliver triangles can still arise when strata
+intersections produce narrow pieces. For minimum-angle guarantees via Steiner
+point insertion, `sfdct::ct_triangulate()` (which wraps Shewchuk's Triangle
+library) is the upgrade path. The swap would be isolated to `triangulate_sf()`
+— nothing else in the stack would change.
+
+---
+
+## Summary
+
+| Function | Input | Output | Key guarantee |
+|---|---|---|---|
+| `triangulate_sf(x)` | Projected polygon | sfc of triangles | Interior triangles only |
+| `get_triangle_coords(x)` | Single triangle sfg/sfc | 3×2 matrix | No closing duplicate |
+
+Both functions require a projected CRS. Use `ensure_projected()` to convert
+geographic inputs.
