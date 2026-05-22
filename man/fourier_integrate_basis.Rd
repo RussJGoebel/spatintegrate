@@ -2,76 +2,78 @@
 % Please edit documentation in R/fourier_integrate.R
 \name{fourier_integrate_basis}
 \alias{fourier_integrate_basis}
-\title{Exact Fourier Integration Over a Set of Polygons}
+\title{Exact Cosine Basis Integration Over a Set of Polygons}
 \usage{
-fourier_integrate_basis(polygons_sf, omega_mat, min_area = 0)
+fourier_integrate_basis(polygons_sf, freq_grid, min_area = 0)
 }
 \arguments{
-\item{polygons_sf}{An \code{sf} object whose rows are the polygons to
-integrate over. Must be in a projected CRS.}
+\item{polygons_sf}{An \code{sf} object in a projected CRS. One row per
+polygon.}
 
-\item{omega_mat}{An \eqn{r \times 2} numeric matrix of angular frequencies,
-typically from \code{\link[=fourier_freq_grid]{fourier_freq_grid()}}. Each row is one
-\eqn{(\omega_x, \omega_y)} pair.}
+\item{freq_grid}{A list returned by \code{\link[=fourier_freq_grid]{fourier_freq_grid()}}.}
 
 \item{min_area}{Non-negative numeric. Triangles with area \code{<= min_area}
 are skipped. Default \code{0}.}
 }
 \value{
-A numeric matrix of dimensions \eqn{n \times 2r}. Rows correspond
-to polygons; column pairs correspond to (cos, sin) for each frequency.
-Rows for polygons that produce no valid triangles contain \code{NA}.
+A numeric matrix of dimensions \eqn{n \times J^2}. Columns
+correspond to \eqn{(j_1, j_2)} index pairs in the order returned by
+\code{freq_grid$indices}. Rows for polygons producing no valid triangles
+contain \code{NA}.
 }
 \description{
-Computes an \eqn{n \times 2r} matrix \eqn{A} where each row is the
-area-weighted average of the Fourier basis functions over one polygon:
+Computes an \eqn{n \times J^2} matrix \eqn{A} where each entry is the
+normalised area-weighted average of one Neumann cosine basis function over
+one polygon:
 }
 \details{
-\deqn{A_{i, \text{cos}(k)} = \frac{1}{|D_i|} \int_{D_i} \cos(\omega_k \cdot s) \, ds}
-\deqn{A_{i, \text{sin}(k)} = \frac{1}{|D_i|} \int_{D_i} \sin(\omega_k \cdot s) \, ds}
-
-Integration is \strong{exact} (up to floating-point precision): each polygon is
-triangulated and the closed-form integral of \eqn{e^{i \omega \cdot s}} over
-each triangle is evaluated analytically, then summed and area-normalised.
-No quadrature error is introduced.
-}
-\section{Column layout}{
-
-Columns are ordered as: cos for freq 1, sin for freq 1, cos for freq 2,
-sin for freq 2, ..., giving \eqn{2r} columns total. Retrieve cos/sin
-columns for frequency \eqn{k} with indices \eqn{2k-1} and \eqn{2k}.
-The zero-frequency cos column is a column of 1s (constant term);
-the zero-frequency sin column is all zeros and may be dropped if not needed.
+\deqn{
+  A_{i,\mathbf{j}}
+  = \frac{1}{|D_i|}
+    \int_{D_i}
+    \phi_{\mathbf{j}}(s)\, ds
+  = \frac{c_{\mathbf{j}}}{|D_i|}
+    \int_{D_i}
+    \cos\!\big((j_1-1)\pi s_x / L_x\big)\,
+    \cos\!\big((j_2-1)\pi s_y / L_y\big)\, ds
 }
 
-\section{Domain}{
+where \eqn{c_{\mathbf{j}} = \sqrt{2-\delta_{j_1,1}}\,\sqrt{2-\delta_{j_2,1}}}
+is the orthonormalisation constant, and \eqn{s_x, s_y} are coordinates
+relative to the domain origin \eqn{(x_{\min}, y_{\min})} from
+\code{freq_grid$domain_bbox}.
 
-For exact results the domain should be periodic — a rectangular box
-embedding the footprints. For non-periodic spatial domains, the Fourier
-approximation introduces Gibbs-like edge effects that decay as \eqn{K}
-increases. A common remedy is to embed the domain in a 2x-larger box.
+Integration is exact up to floating-point precision: each polygon is
+triangulated and the closed-form integral of \eqn{e^{i\omega\cdot s}} over
+each triangle is accumulated analytically. No quadrature error is introduced.
+}
+\section{Coordinate shifting}{
+
+Triangle coordinates are shifted to domain-local frame
+\eqn{[0, L_x] \times [0, L_y]} before integration, using the origin stored
+in \code{freq_grid$domain_bbox}. This means \code{polygons_sf} may be in
+any absolute projected CRS — only the bounding box passed to
+\code{fourier_freq_grid()} needs to match the extent of the data.
+}
+
+\section{Note on separability}{
+
+The 2D cosine basis is separable:
+\eqn{\phi_{j_1,j_2}(s) = \phi_{j_1}(s_x)\,\phi_{j_2}(s_y)}.
+The integral over an arbitrary polygon is \emph{not} separable (the
+polygon shape couples the two dimensions), so integration is performed
+jointly over both dimensions using triangle decomposition.
 }
 
 \examples{
-# Small projected square footprints
-make_square <- function(x0, y0, w = 1e4) {
-  sf::st_polygon(list(matrix(
-    c(x0, y0, x0+w, y0, x0+w, y0+w, x0, y0+w, x0, y0),
-    ncol = 2, byrow = TRUE
-  )))
+\dontrun{
+bbox     <- as.vector(sf::st_bbox(polygons_sf))
+fg       <- fourier_freq_grid(J = 5, domain_bbox = bbox)
+A        <- fourier_integrate_basis(polygons_sf, fg)
+dim(A)   # nrow(polygons_sf) x 25
 }
-polys <- sf::st_sf(
-  id       = 1:2,
-  geometry = sf::st_sfc(make_square(0, 0), make_square(1e4, 0), crs = 32619)
-)
-
-# Frequency grid: K=3 over the bounding box
-bbox  <- as.vector(sf::st_bbox(polys))
-freqs <- fourier_freq_grid(K = 3, domain_bbox = bbox)
-A     <- fourier_integrate_basis(polys, freqs)
-dim(A)  # 2 x 98 (2 polygons, 2 * 49 frequencies)
 
 }
 \seealso{
-\code{\link[=fourier_freq_grid]{fourier_freq_grid()}}, \code{\link[=triangulate_sf]{triangulate_sf()}}, \code{\link[=integrate_basis]{integrate_basis()}}
+\code{\link[=fourier_freq_grid]{fourier_freq_grid()}}
 }

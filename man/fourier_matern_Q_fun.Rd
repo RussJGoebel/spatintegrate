@@ -4,12 +4,16 @@
 \alias{fourier_matern_Q_fun}
 \title{Build a Q_fun for a Matern(nu=1) Prior over a Fourier Basis}
 \usage{
-fourier_matern_Q_fun(freqs, dc_precision = 1e-06)
+fourier_matern_Q_fun(freq_grid, nu = 1, dc_precision = 1e-06)
 }
 \arguments{
-\item{freqs}{r x 2 matrix of angular frequencies from \code{\link[=fourier_freq_grid]{fourier_freq_grid()}}.}
+\item{freq_grid}{A list from \code{\link[=fourier_freq_grid]{fourier_freq_grid()}}.}
 
-\item{dc_precision}{Positive numeric. Precision at zero frequency. Default 1e-6.}
+\item{nu}{Positive numeric. Matern smoothness. Fixed at construction time.
+Default 1 (matches SAR correspondence and dissertation Chapter 4).}
+
+\item{dc_precision}{Positive numeric. Precision at the constant term
+(j1=j2=1). Default 1e-6 (near-flat prior on mean).}
 }
 \value{
 Callable object of class fourier_matern_Q_fun.

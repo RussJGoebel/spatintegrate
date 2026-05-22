@@ -4,14 +4,14 @@
 \alias{sar_to_matern}
 \title{Convert SAR Parameters to Matern Parameters}
 \usage{
-sar_to_matern(rho, tau2, delta)
+sar_to_matern(rho, sigma_sar2, delta)
 }
 \arguments{
 \item{rho}{Numeric in (0, 1). SAR spatial autoregression parameter.}
 
-\item{tau2}{Positive numeric. SAR conditional variance.}
-
 \item{delta}{Positive numeric. Grid spacing (CRS units).}
+
+\item{tau2}{Positive numeric. SAR conditional variance.}
 }
 \value{
 Named list with elements \code{range} and \code{sigma2}.

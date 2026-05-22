@@ -4,14 +4,15 @@
 \alias{fourier_sar_Q_fun}
 \title{Build a Q_fun for a SAR(rook, nu=1) Prior over a Fourier Basis}
 \usage{
-fourier_sar_Q_fun(freqs, delta, dc_precision = 1e-06)
+fourier_sar_Q_fun(freq_grid, delta, dc_precision = NULL)
 }
 \arguments{
-\item{freqs}{r x 2 matrix of angular frequencies from \code{\link[=fourier_freq_grid]{fourier_freq_grid()}}.}
+\item{freq_grid}{A list from \code{\link[=fourier_freq_grid]{fourier_freq_grid()}}.}
 
-\item{delta}{Positive numeric. Grid spacing (CRS units) of the SAR model.}
+\item{delta}{Positive numeric. Grid spacing (CRS units) of the SAR model
+being matched.}
 
-\item{dc_precision}{Positive numeric. Precision at zero frequency. Default 1e-6.}
+\item{dc_precision}{Positive numeric. Precision at the constant term. Default 1e-6.}
 }
 \value{
 Callable object of class fourier_sar_Q_fun.
@@ -26,6 +27,17 @@ via summarize_prior().
 \details{
 Parameters tuned by tune_ml: logit_rho, log_tau2.
 }
+\section{Parameters tuned by tune_ml}{
+
+\describe{
+\item{\code{logit_rho}}{Logit of rho in (0,1). Controls spatial range.}
+\item{\code{log_tau2}}{Log of the SAR conditional variance tau2.
+Same tau2 as in Q_SAR = (I - rho\emph{W)\'(I - rho}W) / tau2. Using the
+same (rho, tau2, delta) in both models gives exactly matched priors,
+since the Fourier basis diagonalises the SAR precision on a regular grid.}
+}
+}
+
 \seealso{
 \code{\link[=fourier_matern_Q_fun]{fourier_matern_Q_fun()}}, \code{\link[=summarize_prior]{summarize_prior()}}, \code{\link[=sar_to_matern]{sar_to_matern()}}
 }

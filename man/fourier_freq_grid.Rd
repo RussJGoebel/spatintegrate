@@ -2,39 +2,52 @@
 % Please edit documentation in R/fourier_integrate.R
 \name{fourier_freq_grid}
 \alias{fourier_freq_grid}
-\title{Build a Fourier Frequency Grid}
+\title{Build a Neumann Cosine Frequency Grid}
 \usage{
-fourier_freq_grid(K, domain_bbox)
+fourier_freq_grid(J, domain_bbox)
 }
 \arguments{
-\item{K}{Non-negative integer. Maximum frequency index in each dimension.
-Total number of frequencies is \eqn{(2K+1)^2}.}
+\item{J}{Positive integer. Maximum index in each dimension. Gives \eqn{J^2}
+basis functions total. \eqn{J = 1} returns only the constant.}
 
-\item{domain_bbox}{A length-4 numeric vector \eqn{(x_{\min}, y_{\min},
-  x_{\max}, y_{\max})} in the same projected CRS as the polygons that will
-be passed to \code{\link[=fourier_integrate_basis]{fourier_integrate_basis()}}. Frequencies are scaled to this
-domain.}
+\item{domain_bbox}{Length-4 numeric vector
+\eqn{(x_{\min}, y_{\min}, x_{\max}, y_{\max})} in the projected CRS.}
 }
 \value{
-An \eqn{r \times 2} numeric matrix of angular frequencies, where
-\eqn{r = (2K+1)^2}. Each row is one \eqn{(\omega_x, \omega_y)} pair.
-The matrix has a \code{"K"} attribute and a \code{"domain_bbox"} attribute
-for reference.
+A list with elements:
+\describe{
+\item{\code{omega_mat}}{An \eqn{J^2 \times 2} matrix of angular
+frequencies in CRS units (radians per meter).}
+\item{\code{indices}}{An \eqn{J^2 \times 2} integer matrix of
+\eqn{(j_1, j_2)} index pairs.}
+\item{\code{norm_const}}{Length-\eqn{J^2} vector of normalisation
+constants \eqn{\sqrt{2-\delta_{j_1,1}} \cdot \sqrt{2-\delta_{j_2,1}}}.}
+\item{\code{J}}{The value of \code{J}.}
+\item{\code{domain_bbox}}{The supplied bounding box.}
+}
 }
 \description{
-Constructs an \eqn{r \times 2} matrix of 2D frequency vectors
-\eqn{(\omega_{k_1}, \omega_{k_2})} for use with \code{\link[=fourier_integrate_basis]{fourier_integrate_basis()}}.
+Constructs the index matrix and corresponding angular frequency vectors for
+the 2D Neumann cosine basis on a rectangular domain, matching the
+eigenfunctions of the Laplacian under Neumann boundary conditions:
 }
 \details{
-Frequencies are \eqn{2\pi k / L} where \eqn{L} is the domain side length
-and \eqn{k} ranges over all integer pairs with
-\eqn{\max(|k_1|, |k_2|) \le K}, giving \eqn{(2K+1)^2} frequency pairs.
-The zero frequency is included and gives a constant basis function.
+\deqn{
+  \phi_{\mathbf{j}}(s)
+  = \prod_{k=1}^2 \sqrt{2 - \delta_{j_k,1}}\,
+    \cos\!\big((j_k - 1)\pi\, s_k / L_k\big)
+}
+
+where \eqn{j_k \in \{1, \ldots, J\}} and \eqn{L_k} is the domain width.
+The index \eqn{j_k = 1} gives the constant term in dimension \eqn{k};
+\eqn{j_k = 2} gives one half-wave; \eqn{j_k = J} gives \eqn{J-1}
+half-waves.
 }
 \examples{
-bbox  <- c(0, 0, 1e6, 1e6)
-freqs <- fourier_freq_grid(K = 5, domain_bbox = bbox)
-nrow(freqs)  # (2*5 + 1)^2 = 121
+bbox <- c(0, 0, 200e3, 200e3)
+fg   <- fourier_freq_grid(J = 5, domain_bbox = bbox)
+fg$indices   # 25 x 2 integer matrix
+fg$omega_mat # 25 x 2 angular frequency matrix
 
 }
 \seealso{

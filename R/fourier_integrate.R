@@ -31,6 +31,12 @@
 # with theta1 = omega.s1, a = omega.(s2-s1), b = omega.(s3-s1), and F(a,b)
 # derived from the barycentric change of variables (see .fourier_triangle_integral).
 #
+# IMPORTANT: triangle coordinates must be expressed relative to the domain
+# origin (domain_bbox[1], domain_bbox[2]) before being passed to
+# .fourier_triangle_integral. The basis functions are defined on
+# [0, Lx] x [0, Ly], not on raw CRS coordinates. fourier_integrate_basis()
+# applies this shift automatically using freq_grid$domain_bbox.
+#
 # Two functions:
 #   .fourier_triangle_integral()  — internal, one triangle, all frequencies
 #   fourier_integrate_basis()     — user-facing, returns n x r matrix A
@@ -61,7 +67,8 @@
 
 # Exact integral of e^{i omega . s} over triangle T.
 #
-# triangle_coords : 3 x 2 numeric matrix, vertices s1, s2, s3 in CRS units
+# triangle_coords : 3 x 2 numeric matrix, vertices s1, s2, s3 in domain-local
+#                   coordinates (i.e. already shifted so domain origin = (0,0))
 # omega_mat       : r x 2 numeric matrix, angular frequency vectors (rad / CRS unit)
 # area            : scalar, area of T in CRS units^2
 #
@@ -204,11 +211,20 @@ fourier_freq_grid <- function(J, domain_bbox) {
 #' }
 #'
 #' where \eqn{c_{\mathbf{j}} = \sqrt{2-\delta_{j_1,1}}\,\sqrt{2-\delta_{j_2,1}}}
-#' is the orthonormalisation constant.
+#' is the orthonormalisation constant, and \eqn{s_x, s_y} are coordinates
+#' relative to the domain origin \eqn{(x_{\min}, y_{\min})} from
+#' \code{freq_grid$domain_bbox}.
 #'
 #' Integration is exact up to floating-point precision: each polygon is
 #' triangulated and the closed-form integral of \eqn{e^{i\omega\cdot s}} over
 #' each triangle is accumulated analytically. No quadrature error is introduced.
+#'
+#' @section Coordinate shifting:
+#' Triangle coordinates are shifted to domain-local frame
+#' \eqn{[0, L_x] \times [0, L_y]} before integration, using the origin stored
+#' in \code{freq_grid$domain_bbox}. This means \code{polygons_sf} may be in
+#' any absolute projected CRS — only the bounding box passed to
+#' \code{fourier_freq_grid()} needs to match the extent of the data.
 #'
 #' @section Note on separability:
 #' The 2D cosine basis is separable:
@@ -259,6 +275,14 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid, min_area = 0) {
   n_poly     <- nrow(polygons_sf)
   geom       <- sf::st_geometry(polygons_sf)
 
+  # Domain origin — coordinates are shifted to [0, Lx] x [0, Ly] before
+  # integration so that the basis functions cos((j-1)*pi*s/L) are evaluated
+  # at the correct phase. Without this shift, raw CRS coordinates (e.g. UTM
+  # values in the hundreds of thousands) produce cosines at completely wrong
+  # phases, causing spatial artifacts in the fitted field.
+  origin_x <- freq_grid$domain_bbox[1L]
+  origin_y <- freq_grid$domain_bbox[2L]
+
   # For the 2D Neumann cosine basis, each basis function is a product:
   #   cos(omega_x * s_x) * cos(omega_y * s_y)
   #
@@ -293,7 +317,13 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid, min_area = 0) {
     int_minus <- complex(r)
     int_plus  <- complex(r)
     for (j in seq_along(tris)) {
-      coords    <- get_triangle_coords(tris[[j]])
+      coords <- get_triangle_coords(tris[[j]])
+
+      # Shift to domain-local frame [0, Lx] x [0, Ly].
+      # Areas are translation-invariant so areas[j] is unaffected.
+      coords[, 1L] <- coords[, 1L] - origin_x
+      coords[, 2L] <- coords[, 2L] - origin_y
+
       int_minus <- int_minus + .fourier_triangle_integral(coords, omega_minus, areas[j])
       int_plus  <- int_plus  + .fourier_triangle_integral(coords, omega_plus,  areas[j])
     }
