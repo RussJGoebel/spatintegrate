@@ -102,20 +102,12 @@ sar_to_matern <- function(rho, sigma_sar2, delta) {
 # omega_sq: length-r vector ||omega_k||^2 from freq_grid$omega_mat
 # ------------------------------------------------------------------------------
 
-# Normalised so that sum(lambda_j, non-DC) = sigma2.
-# This makes sigma2 exactly the marginal variance of the truncated basis
-# expansion, regardless of J or domain size — directly interpretable.
 .matern_eigenvalues <- function(omega_sq, range, sigma2, nu) {
-  kappa2   <- 8 / range^2
-  alpha    <- nu + 1L          # nu + d/2, d = 2
-  eigs_raw <- (kappa2 + omega_sq)^(-alpha)
-  # Normalise over non-DC terms (DC handled separately via dc_precision)
-  nondc    <- omega_sq > 0
-  if (any(nondc)) {
-    eigs_raw[nondc] <- sigma2 * eigs_raw[nondc] / sum(eigs_raw[nondc])
-  }
-  eigs_raw
+  kappa2 <- 8 / range^2
+  alpha  <- nu + 1L          # nu + d/2, d = 2
+  sigma2 * (kappa2 + omega_sq)^(-alpha)
 }
+
 
 
 # ------------------------------------------------------------------------------
