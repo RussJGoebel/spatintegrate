@@ -29,6 +29,17 @@
 # Note: sigma_SAR^2 here is the marginal variance of y (the grid vector),
 # which differs from sigma_M^2 by a factor of delta^2 due to the
 # vector vs function norm difference (see dissertation Chapter 5).
+#
+# PATCH NOTE (fourier_matern_Q_fun):
+# The Fourier basis functions phi_j are orthonormal on the continuous domain
+# [0,Lx] x [0,Ly] in the L2 sense: integral phi_j^2 ds = 1.
+# The Matern eigenvalues lambda_j = sigma2_M * (kappa^2 + omega_j^2)^{-alpha}
+# are in "function space". When fit_fastblm fits coefficients beta via
+# y = A_f beta + eps, the prior variance on beta_j must account for the
+# domain area: Var[beta_j] = lambda_j * domain_area.
+# Without this scaling, the prior is domain_area times too weak, producing
+# large high-frequency coefficients that corrupt pointwise predictions.
+# Fix: multiply eigenvalues by Lx*Ly inside fourier_matern_Q_fun.
 
 
 # ------------------------------------------------------------------------------
@@ -66,10 +77,10 @@ matern_to_sar <- function(range, sigma2, delta) {
 #' parameters, using the exact discrete-Laplacian correspondence.
 #'
 #' @param rho Numeric in (0, 1). SAR spatial autoregression parameter.
-#' @param tau2 Positive numeric. SAR conditional variance.
+#' @param sigma_sar2 Positive numeric. SAR marginal variance.
 #' @param delta Positive numeric. Grid spacing (CRS units).
 #'
-#' @return Named list with elements \code{range} and \code{sigma2}.
+#' @return Named list with elements \code{range} and \code{sigma_m2}.
 #' @seealso [matern_to_sar()]
 #' @export
 sar_to_matern <- function(rho, sigma_sar2, delta) {
@@ -86,20 +97,6 @@ sar_to_matern <- function(rho, sigma_sar2, delta) {
 
 # ------------------------------------------------------------------------------
 # Matern eigenvalues for the Neumann cosine basis (dissertation Chapter 4)
-#
-# For basis index j = (j1, j2) on physical domain [0,Lx] x [0,Ly]:
-#
-#   lambda_j = sigma2 * (kappa^2 + omega_x^2 + omega_y^2)^{-alpha}
-#
-# where omega_k = (j_k - 1) * pi / L_k  is the Laplacian eigenvalue on [0,L_k],
-# alpha = nu + d/2 = nu + 1  (d=2), and kappa^2 = 8 / range^2.
-#
-# This matches the tex formula lambda_j = sigma2*(kappa^2 + pi^2*sum(j_k-1)^2)^{-alpha}
-# on the unit square [0,1]^2, since there omega_k = (j_k-1)*pi.
-# On a physical domain [0,L]^2 the correct Laplacian eigenvalue is
-# omega_k^2 = pi^2*(j_k-1)^2/L^2, already encoded in freq_grid$omega_mat.
-#
-# omega_sq: length-r vector ||omega_k||^2 from freq_grid$omega_mat
 # ------------------------------------------------------------------------------
 
 .matern_eigenvalues <- function(omega_sq, range, sigma2, nu) {
@@ -107,7 +104,6 @@ sar_to_matern <- function(rho, sigma_sar2, delta) {
   alpha  <- nu + 1L          # nu + d/2, d = 2
   sigma2 * (kappa2 + omega_sq)^(-alpha)
 }
-
 
 
 # ------------------------------------------------------------------------------
@@ -121,10 +117,8 @@ sar_to_matern <- function(rho, sigma_sar2, delta) {
 #' Parameters tuned by tune_ml: log_range, log_sigma2.
 #'
 #' @param freq_grid A list from [fourier_freq_grid()].
-#' @param nu Positive numeric. Matern smoothness. Fixed at construction time.
-#'   Default 1 (matches SAR correspondence and dissertation Chapter 4).
-#' @param dc_precision Positive numeric. Precision at the constant term
-#'   (j1=j2=1). Default 1e-6 (near-flat prior on mean).
+#' @param nu Positive numeric. Matern smoothness. Default 1.
+#' @param dc_precision Positive numeric. Precision at the constant term. Default 1e-6.
 #'
 #' @return Callable object of class fourier_matern_Q_fun.
 #' @seealso [fourier_sar_Q_fun()], [summarize_prior()], [matern_to_sar()]
@@ -138,12 +132,21 @@ fourier_matern_Q_fun <- function(freq_grid, nu = 1, dc_precision = 1e-6) {
     stop("`dc_precision` must be a positive numeric scalar.")
 
   omega_sq <- freq_grid$omega_mat[, 1L]^2 + freq_grid$omega_mat[, 2L]^2
-  is_dc    <- omega_sq == 0   # j1=j2=1: constant term
+  is_dc    <- omega_sq == 0
+
+  # Domain area: scales eigenvalues from function-space to coefficient-space.
+  # The Fourier basis is orthonormal on [0,Lx]x[0,Ly] in L2, so the prior
+  # variance on coefficient beta_j equals the function-space eigenvalue
+  # times the domain area Lx*Ly.
+  Lx          <- freq_grid$domain_bbox[3L] - freq_grid$domain_bbox[1L]
+  Ly          <- freq_grid$domain_bbox[4L] - freq_grid$domain_bbox[2L]
+  domain_area <- Lx * Ly
 
   fn <- function(theta) {
     range  <- exp(theta[["log_range"]])
     sigma2 <- exp(theta[["log_sigma2"]])
     eigs        <- .matern_eigenvalues(omega_sq, range, sigma2, nu)
+    eigs        <- eigs * domain_area   # convert function-space -> coefficient-space
     eigs[is_dc] <- 1 / dc_precision
     q_diag    <- 1 / eigs
     Q         <- Matrix::Diagonal(x = q_diag)
@@ -176,15 +179,6 @@ fourier_matern_Q_fun <- function(freq_grid, nu = 1, dc_precision = 1e-6) {
 #'   being matched.
 #' @param dc_precision Positive numeric. Precision at the constant term. Default 1e-6.
 #'
-#' @section Parameters tuned by tune_ml:
-#' \describe{
-#'   \item{\code{logit_rho}}{Logit of rho in (0,1). Controls spatial range.}
-#'   \item{\code{log_tau2}}{Log of the SAR conditional variance tau2.
-#'     Same tau2 as in Q_SAR = (I - rho*W)\'(I - rho*W) / tau2. Using the
-#'     same (rho, tau2, delta) in both models gives exactly matched priors,
-#'     since the Fourier basis diagonalises the SAR precision on a regular grid.}
-#' }
-#'
 #' @return Callable object of class fourier_sar_Q_fun.
 #' @seealso [fourier_matern_Q_fun()], [summarize_prior()], [sar_to_matern()]
 #' @export
@@ -194,20 +188,10 @@ fourier_sar_Q_fun <- function(freq_grid, delta, dc_precision = NULL) {
   if (!is.numeric(delta) || length(delta) != 1L || delta <= 0)
     stop("`delta` must be a positive numeric scalar.")
 
-  # Fourier frequencies for the Neumann cosine basis
-  # omega_k = (j_k - 1) * pi / L_k
-  # Eigenvalues of rook W at these frequencies:
-  #   lambda_W(omega) = 0.5 * (cos(omega_x * delta) + cos(omega_y * delta))
-  # This is exact for a periodic grid; for Neumann BC it is an approximation
-  # that becomes exact in the interior as grid size grows.
   omega_x  <- freq_grid$omega_mat[, 1L]
   omega_y  <- freq_grid$omega_mat[, 2L]
   lambda_W <- 0.5 * (cos(omega_x * delta) + cos(omega_y * delta))
 
-  # Number of SAR grid cells: n = (L/delta)^2
-  # The Fourier basis is orthonormal on the continuous domain,
-  # but SAR coefficients are field values at grid cells.
-  # To match field variances: q_fourier_k = n * (1-rho*lambda_W_k)^2 / tau2
   Lx <- freq_grid$domain_bbox[3L] - freq_grid$domain_bbox[1L]
   Ly <- freq_grid$domain_bbox[4L] - freq_grid$domain_bbox[2L]
   n_cells <- (Lx / delta) * (Ly / delta)
@@ -215,8 +199,6 @@ fourier_sar_Q_fun <- function(freq_grid, delta, dc_precision = NULL) {
   fn <- function(theta) {
     rho  <- 1 / (1 + exp(-theta[["logit_rho"]]))
     tau2 <- exp(theta[["log_tau2"]])
-    # SAR precision eigenvalues scaled by n to match field variance:
-    # Var(v(s)) under Fourier prior = Var(y_j) under SAR prior
     q_diag    <- n_cells * (1 - rho * lambda_W)^2 / tau2
     Q         <- Matrix::Diagonal(x = q_diag)
     log_det_Q <- sum(log(q_diag))
@@ -303,8 +285,6 @@ summarize_prior.fourier_sar_Q_fun <- function(Q_fun, theta, delta = NULL) {
   tau2 <- exp(theta[["log_tau2"]])
   d    <- attr(Q_fun, "delta")
 
-  # Convert tau2 to sigma_sar2 for the Matern conversion
-  # (tau2 and sigma_sar2 are the same parameter: both are the SAR marginal variance)
   matern <- sar_to_matern(rho, tau2, d)
 
   cat("Fitted Fourier prior — SAR(rook, nu=1)\n")

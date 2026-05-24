@@ -27,17 +27,6 @@ via summarize_prior().
 \details{
 Parameters tuned by tune_ml: logit_rho, log_tau2.
 }
-\section{Parameters tuned by tune_ml}{
-
-\describe{
-\item{\code{logit_rho}}{Logit of rho in (0,1). Controls spatial range.}
-\item{\code{log_tau2}}{Log of the SAR conditional variance tau2.
-Same tau2 as in Q_SAR = (I - rho\emph{W)\'(I - rho}W) / tau2. Using the
-same (rho, tau2, delta) in both models gives exactly matched priors,
-since the Fourier basis diagonalises the SAR precision on a regular grid.}
-}
-}
-
 \seealso{
 \code{\link[=fourier_matern_Q_fun]{fourier_matern_Q_fun()}}, \code{\link[=summarize_prior]{summarize_prior()}}, \code{\link[=sar_to_matern]{sar_to_matern()}}
 }

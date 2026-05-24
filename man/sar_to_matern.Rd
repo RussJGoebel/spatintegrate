@@ -9,12 +9,12 @@ sar_to_matern(rho, sigma_sar2, delta)
 \arguments{
 \item{rho}{Numeric in (0, 1). SAR spatial autoregression parameter.}
 
-\item{delta}{Positive numeric. Grid spacing (CRS units).}
+\item{sigma_sar2}{Positive numeric. SAR marginal variance.}
 
-\item{tau2}{Positive numeric. SAR conditional variance.}
+\item{delta}{Positive numeric. Grid spacing (CRS units).}
 }
 \value{
-Named list with elements \code{range} and \code{sigma2}.
+Named list with elements \code{range} and \code{sigma_m2}.
 }
 \description{
 Converts SAR (rook neighbors, nu=1) parameters to equivalent Matern(nu=1)
