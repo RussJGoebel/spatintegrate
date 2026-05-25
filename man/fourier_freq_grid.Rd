@@ -8,11 +8,11 @@ fourier_freq_grid(J1, J2 = J1, domain_bbox)
 }
 \arguments{
 \item{J1}{Positive integer. Number of frequency components in the \eqn{x}
-(column) direction. For a raster grid use \code{J1 = m1}.}
+direction. For a raster grid use \code{J1 = m1}.}
 
 \item{J2}{Positive integer. Number of frequency components in the \eqn{y}
-(row) direction. For a raster grid use \code{J2 = m2}.
-Default \code{J1} (square grid, backward compatible with old \code{J} argument).}
+direction. For a raster grid use \code{J2 = m2}.
+Default \code{J1} (square grid).}
 
 \item{domain_bbox}{Length-4 numeric vector
 \eqn{(x_{\min}, y_{\min}, x_{\max}, y_{\max})} in the projected CRS.}
@@ -24,8 +24,8 @@ A list with elements:
 frequencies in CRS units (radians per CRS unit).}
 \item{\code{indices}}{A \eqn{J_1 J_2 \times 2} integer matrix of
 \eqn{(j_1, j_2)} index pairs, \eqn{j_1} varying fastest.}
-\item{\code{norm_const}}{Length-\eqn{J_1 J_2} vector of normalisation
-constants \eqn{\sqrt{2-\delta_{j_1,1}} \cdot \sqrt{2-\delta_{j_2,1}}}.}
+\item{\code{norm_const}}{Length-\eqn{J_1 J_2} vector of physical-unit
+normalisation constants \eqn{c^{(1)}_{j_1} \cdot c^{(2)}_{j_2}}.}
 \item{\code{J1}, \code{J2}}{The frequency counts used.}
 \item{\code{domain_bbox}}{The supplied bounding box.}
 }
@@ -33,20 +33,24 @@ constants \eqn{\sqrt{2-\delta_{j_1,1}} \cdot \sqrt{2-\delta_{j_2,1}}}.}
 \description{
 Constructs the index matrix and corresponding angular frequency vectors for
 the 2D Neumann cosine basis on a rectangular domain, matching the
-eigenfunctions of the Laplacian under Neumann boundary conditions:
+eigenfunctions of the Laplacian under Neumann boundary conditions.
 }
 \details{
+The basis functions are orthonormal under the physical L2 inner product on
+\eqn{[0,L_x] \times [0,L_y]}:
 \deqn{
   \phi_{\mathbf{j}}(s)
-  = \prod_{k=1}^2 \sqrt{2 - \delta_{j_k,1}}\,
-    \cos\!\big((j_k - 1)\pi\, s_k / L_k\big)
+  = c^{(1)}_{j_1} c^{(2)}_{j_2}
+    \cos\!\big((j_1 - 1)\pi\, s_x / L_x\big)
+    \cos\!\big((j_2 - 1)\pi\, s_y / L_y\big)
 }
+where the normalisation constants are
+\eqn{c^{(k)}_1 = 1/\sqrt{L_k}} (constant mode) and
+\eqn{c^{(k)}_j = \sqrt{2/L_k}} for \eqn{j \geq 2} (non-constant modes).
 
-where \eqn{j_1 \in \{1,\ldots,J_1\}}, \eqn{j_2 \in \{1,\ldots,J_2\}},
-and \eqn{L_k} is the domain width in dimension \eqn{k}.
-The index \eqn{j_k = 1} gives the constant term in dimension \eqn{k};
-\eqn{j_k = 2} gives one half-wave; \eqn{j_k = J_k} gives \eqn{J_k - 1}
-half-waves. Total modes: \eqn{J_1 \times J_2}.
+This ensures \eqn{\int \phi_j(s)^2 \, ds = 1} for all \eqn{j}, and at the
+discrete level \eqn{h^2 \Phi^\top \Phi = I} where \eqn{h} is the pixel size.
+This normalisation matches \code{make_Q_cosine()} in \code{sar_matern.R}.
 
 For a square grid (\eqn{J_1 = J_2 = J}) this is equivalent to the
 previous single-\code{J} interface. For a rectangular \eqn{m_1 \times m_2}
@@ -63,7 +67,7 @@ corresponds to diagonal entry \eqn{k} of \eqn{Q} from \code{make_Q_cosine()}.
 }
 
 \examples{
-# Square grid (backward compatible)
+# Square grid
 bbox <- c(0, 0, 200e3, 200e3)
 fg   <- fourier_freq_grid(J1 = 5, domain_bbox = bbox)
 fg$indices    # 25 x 2 integer matrix

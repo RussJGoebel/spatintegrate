@@ -32,15 +32,15 @@ one polygon:
   = \frac{1}{|D_i|}
     \int_{D_i}
     \phi_{\mathbf{j}}(s)\, ds
-  = \frac{c_{\mathbf{j}}}{|D_i|}
+  = \frac{c^{(1)}_{j_1} c^{(2)}_{j_2}}{|D_i|}
     \int_{D_i}
     \cos\!\big((j_1-1)\pi s_x / L_x\big)\,
     \cos\!\big((j_2-1)\pi s_y / L_y\big)\, ds
 }
 
-where \eqn{c_{\mathbf{j}} = \sqrt{2-\delta_{j_1,1}}\,\sqrt{2-\delta_{j_2,1}}}
-is the orthonormalisation constant, and \eqn{s_x, s_y} are coordinates
-relative to the domain origin \eqn{(x_{\min}, y_{\min})} from
+where \eqn{c^{(k)}_{j_k}} are the physical-unit normalisation constants from
+\code{\link{fourier_freq_grid}}, and \eqn{s_x, s_y} are coordinates relative
+to the domain origin \eqn{(x_{\min}, y_{\min})} from
 \code{freq_grid$domain_bbox}.
 
 Integration is exact up to floating-point precision: each polygon is

@@ -3,23 +3,34 @@
 #
 # Matches the basis from the dissertation (Chapter 4):
 #
-#   phi_j(s) = prod_{k=1}^2 sqrt(2 - delta_{j_k, 1}) * cos((j_k - 1) * pi * s_k / L_k)
+#   phi_j(s) = prod_{k=1}^2 c_{j_k} * cos((j_k - 1) * pi * s_k / L_k)
 #
 # where s in [0, Lx] x [0, Ly] (domain-local coordinates),
 # j = (j1, j2) with j1 in {1, ..., J1}, j2 in {1, ..., J2},
-# and delta_{j_k,1} = 1 iff j_k = 1.
+# and the normalisation constants are:
 #
-# The normalisation factor sqrt(2 - delta_{j_k,1}) equals:
-#   1        when j_k = 1  (constant in that dimension)
-#   sqrt(2)  when j_k > 1  (non-constant)
-# so the basis is orthonormal on [0,Lx] x [0,Ly] under Neumann boundary conditions.
+#   c_{j_k} = 1/sqrt(L_k)    when j_k = 1  (constant in that dimension)
+#   c_{j_k} = sqrt(2/L_k)    when j_k > 1  (non-constant)
 #
-# The corresponding Matern eigenvalues are (alpha = nu + d/2):
-#   lambda_{j1,j2} = sigma2_M * (kappa^2 + pi^2*((j1-1)^2/Lx^2 + (j2-1)^2/Ly^2))^{-alpha}
+# This makes the basis orthonormal under the physical L2 inner product on
+# [0,Lx] x [0,Ly]:
 #
-# For a square grid (J1 = J2 = J) this is identical to the original.
-# For a rectangular m1 x m2 grid use J1 = m1, J2 = m2 to get exactly
-# m1*m2 modes with no wasted columns.
+#   integral phi_{j1,j2}(s)^2 ds = 1   for all (j1, j2)
+#
+# and equivalently satisfies h^2 * Phi'Phi = I at the discrete level
+# (where h = pixel size and Phi is the m x K matrix of basis values at
+# cell centres).
+#
+# This normalisation matches make_Q_cosine() in sar_matern.R, which also
+# uses the physical L2 norm. The two must be consistent for the matched
+# SAR-Matern prior to work correctly.
+#
+# The corresponding Matern eigenvalues are (alpha = nu + d/2 = 2 for nu=1, d=2):
+#   lambda_{j1,j2} = sigma2_M_scale * Lx * Ly /
+#                    (kappa^2 + pi^2*((j1-1)^2/Lx^2 + (j2-1)^2/Ly^2))^2
+#
+# For a square grid (J1 = J2 = J, Lx = Ly = L) the normalisation simplifies to
+#   c_{j_k} = 1/sqrt(L) or sqrt(2/L).
 #
 # Mode ordering: expand.grid(j1 = 1:J1, j2 = 1:J2), so j1 varies fastest.
 # This matches make_Q_cosine() in sar_matern.R, guaranteeing that column k
@@ -125,19 +136,23 @@
 #'
 #' Constructs the index matrix and corresponding angular frequency vectors for
 #' the 2D Neumann cosine basis on a rectangular domain, matching the
-#' eigenfunctions of the Laplacian under Neumann boundary conditions:
+#' eigenfunctions of the Laplacian under Neumann boundary conditions.
 #'
+#' The basis functions are orthonormal under the physical L2 inner product on
+#' \eqn{[0,L_x] \times [0,L_y]}:
 #' \deqn{
 #'   \phi_{\mathbf{j}}(s)
-#'   = \prod_{k=1}^2 \sqrt{2 - \delta_{j_k,1}}\,
-#'     \cos\!\big((j_k - 1)\pi\, s_k / L_k\big)
+#'   = c^{(1)}_{j_1} c^{(2)}_{j_2}
+#'     \cos\!\big((j_1 - 1)\pi\, s_x / L_x\big)
+#'     \cos\!\big((j_2 - 1)\pi\, s_y / L_y\big)
 #' }
+#' where the normalisation constants are
+#' \eqn{c^{(k)}_1 = 1/\sqrt{L_k}} (constant mode) and
+#' \eqn{c^{(k)}_j = \sqrt{2/L_k}} for \eqn{j \geq 2} (non-constant modes).
 #'
-#' where \eqn{j_1 \in \{1,\ldots,J_1\}}, \eqn{j_2 \in \{1,\ldots,J_2\}},
-#' and \eqn{L_k} is the domain width in dimension \eqn{k}.
-#' The index \eqn{j_k = 1} gives the constant term in dimension \eqn{k};
-#' \eqn{j_k = 2} gives one half-wave; \eqn{j_k = J_k} gives \eqn{J_k - 1}
-#' half-waves. Total modes: \eqn{J_1 \times J_2}.
+#' This ensures \eqn{\int \phi_j(s)^2 \, ds = 1} for all \eqn{j}, and at the
+#' discrete level \eqn{h^2 \Phi^\top \Phi = I} where \eqn{h} is the pixel size.
+#' This normalisation matches \code{make_Q_cosine()} in \code{sar_matern.R}.
 #'
 #' For a square grid (\eqn{J_1 = J_2 = J}) this is equivalent to the
 #' previous single-\code{J} interface. For a rectangular \eqn{m_1 \times m_2}
@@ -152,10 +167,10 @@
 #' corresponds to diagonal entry \eqn{k} of \eqn{Q} from \code{make_Q_cosine()}.
 #'
 #' @param J1 Positive integer. Number of frequency components in the \eqn{x}
-#'   (column) direction. For a raster grid use \code{J1 = m1}.
+#'   direction. For a raster grid use \code{J1 = m1}.
 #' @param J2 Positive integer. Number of frequency components in the \eqn{y}
-#'   (row) direction. For a raster grid use \code{J2 = m2}.
-#'   Default \code{J1} (square grid, backward compatible with old \code{J} argument).
+#'   direction. For a raster grid use \code{J2 = m2}.
+#'   Default \code{J1} (square grid).
 #' @param domain_bbox Length-4 numeric vector
 #'   \eqn{(x_{\min}, y_{\min}, x_{\max}, y_{\max})} in the projected CRS.
 #'
@@ -165,8 +180,8 @@
 #'       frequencies in CRS units (radians per CRS unit).}
 #'     \item{\code{indices}}{A \eqn{J_1 J_2 \times 2} integer matrix of
 #'       \eqn{(j_1, j_2)} index pairs, \eqn{j_1} varying fastest.}
-#'     \item{\code{norm_const}}{Length-\eqn{J_1 J_2} vector of normalisation
-#'       constants \eqn{\sqrt{2-\delta_{j_1,1}} \cdot \sqrt{2-\delta_{j_2,1}}}.}
+#'     \item{\code{norm_const}}{Length-\eqn{J_1 J_2} vector of physical-unit
+#'       normalisation constants \eqn{c^{(1)}_{j_1} \cdot c^{(2)}_{j_2}}.}
 #'     \item{\code{J1}, \code{J2}}{The frequency counts used.}
 #'     \item{\code{domain_bbox}}{The supplied bounding box.}
 #'   }
@@ -174,7 +189,7 @@
 #' @seealso [fourier_integrate_basis()], \code{make_Q_cosine()} in sar_matern.R
 #'
 #' @examples
-#' # Square grid (backward compatible)
+#' # Square grid
 #' bbox <- c(0, 0, 200e3, 200e3)
 #' fg   <- fourier_freq_grid(J1 = 5, domain_bbox = bbox)
 #' fg$indices    # 25 x 2 integer matrix
@@ -213,9 +228,12 @@ fourier_freq_grid <- function(J1, J2 = J1, domain_bbox) {
     omega_y = (grid$j2 - 1L) * pi / Ly
   )
 
-  # ── normalisation: sqrt(2 - delta_{j_k, 1}) ───────────────────────────────
-  c1 <- ifelse(grid$j1 == 1L, 1, sqrt(2))
-  c2 <- ifelse(grid$j2 == 1L, 1, sqrt(2))
+  # ── normalisation constants (physical L2 norm on [0,Lx] x [0,Ly]) ─────────
+  # c_1 = 1/sqrt(L)   for the constant mode (j=1)
+  # c_j = sqrt(2/L)   for non-constant modes (j>1)
+  # Ensures: integral phi_j(s)^2 ds = 1  and  h^2 * Phi'Phi = I
+  c1 <- ifelse(grid$j1 == 1L, 1 / sqrt(Lx), sqrt(2 / Lx))
+  c2 <- ifelse(grid$j2 == 1L, 1 / sqrt(Ly), sqrt(2 / Ly))
   norm_const <- c1 * c2
 
   list(
@@ -242,15 +260,15 @@ fourier_freq_grid <- function(J1, J2 = J1, domain_bbox) {
 #'   = \frac{1}{|D_i|}
 #'     \int_{D_i}
 #'     \phi_{\mathbf{j}}(s)\, ds
-#'   = \frac{c_{\mathbf{j}}}{|D_i|}
+#'   = \frac{c^{(1)}_{j_1} c^{(2)}_{j_2}}{|D_i|}
 #'     \int_{D_i}
 #'     \cos\!\big((j_1-1)\pi s_x / L_x\big)\,
 #'     \cos\!\big((j_2-1)\pi s_y / L_y\big)\, ds
 #' }
 #'
-#' where \eqn{c_{\mathbf{j}} = \sqrt{2-\delta_{j_1,1}}\,\sqrt{2-\delta_{j_2,1}}}
-#' is the orthonormalisation constant, and \eqn{s_x, s_y} are coordinates
-#' relative to the domain origin \eqn{(x_{\min}, y_{\min})} from
+#' where \eqn{c^{(k)}_{j_k}} are the physical-unit normalisation constants from
+#' \code{\link{fourier_freq_grid}}, and \eqn{s_x, s_y} are coordinates relative
+#' to the domain origin \eqn{(x_{\min}, y_{\min})} from
 #' \code{freq_grid$domain_bbox}.
 #'
 #' Integration is exact up to floating-point precision: each polygon is
@@ -324,7 +342,7 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid, min_area = 0) {
   # For the 2D Neumann cosine basis, each basis function is a product:
   #   cos(omega_x * s_x) * cos(omega_y * s_y)
   #
-  # This is NOT the same as Re(e^{i(omega_x*s_x + omega_y*s_y)}) = cos(omega_x*s_x + omega_y*s_y).
+  # This is NOT the same as Re(e^{i(omega_x*s_x + omega_y*s_y)}).
   #
   # The trig identity gives:
   #   cos(A) cos(B) = 0.5 * [cos(A - B) + cos(A + B)]
@@ -336,7 +354,7 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid, min_area = 0) {
   #   once with omega_plus  = (omega_x, +omega_y)
   # and average the real parts.
   omega_minus <- cbind( omega_mat[, 1L], -omega_mat[, 2L])
-  omega_plus  <- omega_mat   # (omega_x, +omega_y)
+  omega_plus  <- omega_mat
 
   A <- matrix(NA_real_, nrow = n_poly, ncol = r)
 
