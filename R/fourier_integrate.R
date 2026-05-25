@@ -3,18 +3,28 @@
 #
 # Matches the basis from the dissertation (Chapter 4):
 #
-#   phi_j(s) = prod_{k=1}^2 sqrt(2 - delta_{j_k, 1}) * cos((j_k - 1) * pi * s_k)
+#   phi_j(s) = prod_{k=1}^2 sqrt(2 - delta_{j_k, 1}) * cos((j_k - 1) * pi * s_k / L_k)
 #
-# where s in [0,1]^2 (coordinates are normalised to the unit square),
-# j = (j1, j2) with j_k in {1, 2, ..., J}, and delta_{j_k,1} = 1 iff j_k = 1.
+# where s in [0, Lx] x [0, Ly] (domain-local coordinates),
+# j = (j1, j2) with j1 in {1, ..., J1}, j2 in {1, ..., J2},
+# and delta_{j_k,1} = 1 iff j_k = 1.
 #
 # The normalisation factor sqrt(2 - delta_{j_k,1}) equals:
 #   1        when j_k = 1  (constant in that dimension)
 #   sqrt(2)  when j_k > 1  (non-constant)
-# so the basis is orthonormal on [0,1]^2 under Neumann boundary conditions.
+# so the basis is orthonormal on [0,Lx] x [0,Ly] under Neumann boundary conditions.
 #
 # The corresponding Matern eigenvalues are (alpha = nu + d/2):
-#   lambda_j = sigma2 * (kappa^2 + pi^2 * sum_k (j_k - 1)^2)^{-alpha}
+#   lambda_{j1,j2} = sigma2_M * (kappa^2 + pi^2*((j1-1)^2/Lx^2 + (j2-1)^2/Ly^2))^{-alpha}
+#
+# For a square grid (J1 = J2 = J) this is identical to the original.
+# For a rectangular m1 x m2 grid use J1 = m1, J2 = m2 to get exactly
+# m1*m2 modes with no wasted columns.
+#
+# Mode ordering: expand.grid(j1 = 1:J1, j2 = 1:J2), so j1 varies fastest.
+# This matches make_Q_cosine() in sar_matern.R, guaranteeing that column k
+# of A from fourier_integrate_basis() corresponds to diagonal entry k of Q
+# from make_Q_cosine().
 #
 # Integration strategy
 # --------------------
@@ -39,7 +49,7 @@
 #
 # Two functions:
 #   .fourier_triangle_integral()  — internal, one triangle, all frequencies
-#   fourier_integrate_basis()     — user-facing, returns n x r matrix A
+#   fourier_integrate_basis()     — user-facing, returns n x (J1*J2) matrix A
 
 
 # ------------------------------------------------------------------------------
@@ -123,60 +133,87 @@
 #'     \cos\!\big((j_k - 1)\pi\, s_k / L_k\big)
 #' }
 #'
-#' where \eqn{j_k \in \{1, \ldots, J\}} and \eqn{L_k} is the domain width.
+#' where \eqn{j_1 \in \{1,\ldots,J_1\}}, \eqn{j_2 \in \{1,\ldots,J_2\}},
+#' and \eqn{L_k} is the domain width in dimension \eqn{k}.
 #' The index \eqn{j_k = 1} gives the constant term in dimension \eqn{k};
-#' \eqn{j_k = 2} gives one half-wave; \eqn{j_k = J} gives \eqn{J-1}
-#' half-waves.
+#' \eqn{j_k = 2} gives one half-wave; \eqn{j_k = J_k} gives \eqn{J_k - 1}
+#' half-waves. Total modes: \eqn{J_1 \times J_2}.
 #'
-#' @param J Positive integer. Maximum index in each dimension. Gives \eqn{J^2}
-#'   basis functions total. \eqn{J = 1} returns only the constant.
+#' For a square grid (\eqn{J_1 = J_2 = J}) this is equivalent to the
+#' previous single-\code{J} interface. For a rectangular \eqn{m_1 \times m_2}
+#' raster grid use \code{J1 = m1}, \code{J2 = m2} to get exactly
+#' \eqn{m_1 m_2} modes with no wasted columns.
+#'
+#' @section Mode ordering:
+#' Modes are enumerated by \code{expand.grid(j1 = 1:J1, j2 = 1:J2)},
+#' so \eqn{j_1} varies fastest. This matches the ordering used by
+#' \code{make_Q_cosine()} in \code{sar_matern.R}, guaranteeing that column
+#' \eqn{k} of the design matrix \eqn{A} from \code{\link{fourier_integrate_basis}}
+#' corresponds to diagonal entry \eqn{k} of \eqn{Q} from \code{make_Q_cosine()}.
+#'
+#' @param J1 Positive integer. Number of frequency components in the \eqn{x}
+#'   (column) direction. For a raster grid use \code{J1 = m1}.
+#' @param J2 Positive integer. Number of frequency components in the \eqn{y}
+#'   (row) direction. For a raster grid use \code{J2 = m2}.
+#'   Default \code{J1} (square grid, backward compatible with old \code{J} argument).
 #' @param domain_bbox Length-4 numeric vector
 #'   \eqn{(x_{\min}, y_{\min}, x_{\max}, y_{\max})} in the projected CRS.
 #'
 #' @return A list with elements:
 #'   \describe{
-#'     \item{\code{omega_mat}}{An \eqn{J^2 \times 2} matrix of angular
-#'       frequencies in CRS units (radians per meter).}
-#'     \item{\code{indices}}{An \eqn{J^2 \times 2} integer matrix of
-#'       \eqn{(j_1, j_2)} index pairs.}
-#'     \item{\code{norm_const}}{Length-\eqn{J^2} vector of normalisation
+#'     \item{\code{omega_mat}}{A \eqn{J_1 J_2 \times 2} matrix of angular
+#'       frequencies in CRS units (radians per CRS unit).}
+#'     \item{\code{indices}}{A \eqn{J_1 J_2 \times 2} integer matrix of
+#'       \eqn{(j_1, j_2)} index pairs, \eqn{j_1} varying fastest.}
+#'     \item{\code{norm_const}}{Length-\eqn{J_1 J_2} vector of normalisation
 #'       constants \eqn{\sqrt{2-\delta_{j_1,1}} \cdot \sqrt{2-\delta_{j_2,1}}}.}
-#'     \item{\code{J}}{The value of \code{J}.}
+#'     \item{\code{J1}, \code{J2}}{The frequency counts used.}
 #'     \item{\code{domain_bbox}}{The supplied bounding box.}
 #'   }
 #'
-#' @seealso [fourier_integrate_basis()]
+#' @seealso [fourier_integrate_basis()], \code{make_Q_cosine()} in sar_matern.R
 #'
 #' @examples
+#' # Square grid (backward compatible)
 #' bbox <- c(0, 0, 200e3, 200e3)
-#' fg   <- fourier_freq_grid(J = 5, domain_bbox = bbox)
-#' fg$indices   # 25 x 2 integer matrix
-#' fg$omega_mat # 25 x 2 angular frequency matrix
+#' fg   <- fourier_freq_grid(J1 = 5, domain_bbox = bbox)
+#' fg$indices    # 25 x 2 integer matrix
+#' fg$omega_mat  # 25 x 2 angular frequency matrix
+#'
+#' # Rectangular raster grid: 89 rows x 150 cols, h = 330m
+#' bbox_rect <- c(0, 0, 89 * 330, 150 * 330)
+#' fg_rect   <- fourier_freq_grid(J1 = 89, J2 = 150, domain_bbox = bbox_rect)
+#' nrow(fg_rect$omega_mat)  # 89 * 150 = 13350
 #'
 #' @export
-fourier_freq_grid <- function(J, domain_bbox) {
-  if (!is.numeric(J) || length(J) != 1L || J < 1L || J != as.integer(J))
-    stop("`J` must be a positive integer.")
+fourier_freq_grid <- function(J1, J2 = J1, domain_bbox) {
+
+  # ── input validation ───────────────────────────────────────────────────────
+  if (!is.numeric(J1) || length(J1) != 1L || J1 < 1L || J1 != as.integer(J1))
+    stop("`J1` must be a positive integer.")
+  if (!is.numeric(J2) || length(J2) != 1L || J2 < 1L || J2 != as.integer(J2))
+    stop("`J2` must be a positive integer.")
   if (!is.numeric(domain_bbox) || length(domain_bbox) != 4L ||
       any(is.na(domain_bbox)))
     stop("`domain_bbox` must be a length-4 numeric vector (xmin, ymin, xmax, ymax).")
 
-  J  <- as.integer(J)
+  J1 <- as.integer(J1)
+  J2 <- as.integer(J2)
   Lx <- domain_bbox[3L] - domain_bbox[1L]
   Ly <- domain_bbox[4L] - domain_bbox[2L]
   if (Lx <= 0 || Ly <= 0)
     stop("`domain_bbox` must have positive width and height.")
 
-  # Index grid: j1, j2 in {1, ..., J}
-  grid <- expand.grid(j1 = seq_len(J), j2 = seq_len(J))
+  # ── index grid: j1 in {1,..,J1}, j2 in {1,..,J2}, j1 varies fastest ───────
+  grid <- expand.grid(j1 = seq_len(J1), j2 = seq_len(J2))
 
-  # Angular frequencies: omega_k = (j_k - 1) * pi / L_k
+  # ── angular frequencies: omega_k = (j_k - 1) * pi / L_k ──────────────────
   omega_mat <- cbind(
     omega_x = (grid$j1 - 1L) * pi / Lx,
     omega_y = (grid$j2 - 1L) * pi / Ly
   )
 
-  # Normalisation: sqrt(2 - delta_{j_k, 1})
+  # ── normalisation: sqrt(2 - delta_{j_k, 1}) ───────────────────────────────
   c1 <- ifelse(grid$j1 == 1L, 1, sqrt(2))
   c2 <- ifelse(grid$j2 == 1L, 1, sqrt(2))
   norm_const <- c1 * c2
@@ -185,7 +222,8 @@ fourier_freq_grid <- function(J, domain_bbox) {
     omega_mat   = omega_mat,
     indices     = as.matrix(grid),
     norm_const  = norm_const,
-    J           = J,
+    J1          = J1,
+    J2          = J2,
     domain_bbox = domain_bbox
   )
 }
@@ -195,7 +233,7 @@ fourier_freq_grid <- function(J, domain_bbox) {
 
 #' Exact Cosine Basis Integration Over a Set of Polygons
 #'
-#' Computes an \eqn{n \times J^2} matrix \eqn{A} where each entry is the
+#' Computes an \eqn{n \times J_1 J_2} matrix \eqn{A} where each entry is the
 #' normalised area-weighted average of one Neumann cosine basis function over
 #' one polygon:
 #'
@@ -239,19 +277,19 @@ fourier_freq_grid <- function(J, domain_bbox) {
 #' @param min_area Non-negative numeric. Triangles with area \code{<= min_area}
 #'   are skipped. Default \code{0}.
 #'
-#' @return A numeric matrix of dimensions \eqn{n \times J^2}. Columns
+#' @return A numeric matrix of dimensions \eqn{n \times J_1 J_2}. Columns
 #'   correspond to \eqn{(j_1, j_2)} index pairs in the order returned by
-#'   \code{freq_grid$indices}. Rows for polygons producing no valid triangles
-#'   contain \code{NA}.
+#'   \code{freq_grid$indices} (\eqn{j_1} varying fastest). Rows for polygons
+#'   producing no valid triangles contain \code{NA}.
 #'
 #' @seealso [fourier_freq_grid()]
 #'
 #' @examples
 #' \dontrun{
-#' bbox     <- as.vector(sf::st_bbox(polygons_sf))
-#' fg       <- fourier_freq_grid(J = 5, domain_bbox = bbox)
-#' A        <- fourier_integrate_basis(polygons_sf, fg)
-#' dim(A)   # nrow(polygons_sf) x 25
+#' bbox <- as.vector(sf::st_bbox(polygons_sf))
+#' fg   <- fourier_freq_grid(J1 = 89, J2 = 150, domain_bbox = bbox)
+#' A    <- fourier_integrate_basis(polygons_sf, fg)
+#' dim(A)  # nrow(polygons_sf) x 13350
 #' }
 #'
 #' @export
