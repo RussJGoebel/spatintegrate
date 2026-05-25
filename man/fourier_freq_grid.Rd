@@ -4,11 +4,15 @@
 \alias{fourier_freq_grid}
 \title{Build a Neumann Cosine Frequency Grid}
 \usage{
-fourier_freq_grid(J, domain_bbox)
+fourier_freq_grid(J1, J2 = J1, domain_bbox)
 }
 \arguments{
-\item{J}{Positive integer. Maximum index in each dimension. Gives \eqn{J^2}
-basis functions total. \eqn{J = 1} returns only the constant.}
+\item{J1}{Positive integer. Number of frequency components in the \eqn{x}
+(column) direction. For a raster grid use \code{J1 = m1}.}
+
+\item{J2}{Positive integer. Number of frequency components in the \eqn{y}
+(row) direction. For a raster grid use \code{J2 = m2}.
+Default \code{J1} (square grid, backward compatible with old \code{J} argument).}
 
 \item{domain_bbox}{Length-4 numeric vector
 \eqn{(x_{\min}, y_{\min}, x_{\max}, y_{\max})} in the projected CRS.}
@@ -16,13 +20,13 @@ basis functions total. \eqn{J = 1} returns only the constant.}
 \value{
 A list with elements:
 \describe{
-\item{\code{omega_mat}}{An \eqn{J^2 \times 2} matrix of angular
-frequencies in CRS units (radians per meter).}
-\item{\code{indices}}{An \eqn{J^2 \times 2} integer matrix of
-\eqn{(j_1, j_2)} index pairs.}
-\item{\code{norm_const}}{Length-\eqn{J^2} vector of normalisation
+\item{\code{omega_mat}}{A \eqn{J_1 J_2 \times 2} matrix of angular
+frequencies in CRS units (radians per CRS unit).}
+\item{\code{indices}}{A \eqn{J_1 J_2 \times 2} integer matrix of
+\eqn{(j_1, j_2)} index pairs, \eqn{j_1} varying fastest.}
+\item{\code{norm_const}}{Length-\eqn{J_1 J_2} vector of normalisation
 constants \eqn{\sqrt{2-\delta_{j_1,1}} \cdot \sqrt{2-\delta_{j_2,1}}}.}
-\item{\code{J}}{The value of \code{J}.}
+\item{\code{J1}, \code{J2}}{The frequency counts used.}
 \item{\code{domain_bbox}}{The supplied bounding box.}
 }
 }
@@ -38,18 +42,39 @@ eigenfunctions of the Laplacian under Neumann boundary conditions:
     \cos\!\big((j_k - 1)\pi\, s_k / L_k\big)
 }
 
-where \eqn{j_k \in \{1, \ldots, J\}} and \eqn{L_k} is the domain width.
+where \eqn{j_1 \in \{1,\ldots,J_1\}}, \eqn{j_2 \in \{1,\ldots,J_2\}},
+and \eqn{L_k} is the domain width in dimension \eqn{k}.
 The index \eqn{j_k = 1} gives the constant term in dimension \eqn{k};
-\eqn{j_k = 2} gives one half-wave; \eqn{j_k = J} gives \eqn{J-1}
-half-waves.
+\eqn{j_k = 2} gives one half-wave; \eqn{j_k = J_k} gives \eqn{J_k - 1}
+half-waves. Total modes: \eqn{J_1 \times J_2}.
+
+For a square grid (\eqn{J_1 = J_2 = J}) this is equivalent to the
+previous single-\code{J} interface. For a rectangular \eqn{m_1 \times m_2}
+raster grid use \code{J1 = m1}, \code{J2 = m2} to get exactly
+\eqn{m_1 m_2} modes with no wasted columns.
 }
+\section{Mode ordering}{
+
+Modes are enumerated by \code{expand.grid(j1 = 1:J1, j2 = 1:J2)},
+so \eqn{j_1} varies fastest. This matches the ordering used by
+\code{make_Q_cosine()} in \code{sar_matern.R}, guaranteeing that column
+\eqn{k} of the design matrix \eqn{A} from \code{\link{fourier_integrate_basis}}
+corresponds to diagonal entry \eqn{k} of \eqn{Q} from \code{make_Q_cosine()}.
+}
+
 \examples{
+# Square grid (backward compatible)
 bbox <- c(0, 0, 200e3, 200e3)
-fg   <- fourier_freq_grid(J = 5, domain_bbox = bbox)
-fg$indices   # 25 x 2 integer matrix
-fg$omega_mat # 25 x 2 angular frequency matrix
+fg   <- fourier_freq_grid(J1 = 5, domain_bbox = bbox)
+fg$indices    # 25 x 2 integer matrix
+fg$omega_mat  # 25 x 2 angular frequency matrix
+
+# Rectangular raster grid: 89 rows x 150 cols, h = 330m
+bbox_rect <- c(0, 0, 89 * 330, 150 * 330)
+fg_rect   <- fourier_freq_grid(J1 = 89, J2 = 150, domain_bbox = bbox_rect)
+nrow(fg_rect$omega_mat)  # 89 * 150 = 13350
 
 }
 \seealso{
-\code{\link[=fourier_integrate_basis]{fourier_integrate_basis()}}
+\code{\link[=fourier_integrate_basis]{fourier_integrate_basis()}}, \code{make_Q_cosine()} in sar_matern.R
 }

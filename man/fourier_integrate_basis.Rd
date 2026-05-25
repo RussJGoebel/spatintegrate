@@ -16,13 +16,13 @@ polygon.}
 are skipped. Default \code{0}.}
 }
 \value{
-A numeric matrix of dimensions \eqn{n \times J^2}. Columns
+A numeric matrix of dimensions \eqn{n \times J_1 J_2}. Columns
 correspond to \eqn{(j_1, j_2)} index pairs in the order returned by
-\code{freq_grid$indices}. Rows for polygons producing no valid triangles
-contain \code{NA}.
+\code{freq_grid$indices} (\eqn{j_1} varying fastest). Rows for polygons
+producing no valid triangles contain \code{NA}.
 }
 \description{
-Computes an \eqn{n \times J^2} matrix \eqn{A} where each entry is the
+Computes an \eqn{n \times J_1 J_2} matrix \eqn{A} where each entry is the
 normalised area-weighted average of one Neumann cosine basis function over
 one polygon:
 }
@@ -67,10 +67,10 @@ jointly over both dimensions using triangle decomposition.
 
 \examples{
 \dontrun{
-bbox     <- as.vector(sf::st_bbox(polygons_sf))
-fg       <- fourier_freq_grid(J = 5, domain_bbox = bbox)
-A        <- fourier_integrate_basis(polygons_sf, fg)
-dim(A)   # nrow(polygons_sf) x 25
+bbox <- as.vector(sf::st_bbox(polygons_sf))
+fg   <- fourier_freq_grid(J1 = 89, J2 = 150, domain_bbox = bbox)
+A    <- fourier_integrate_basis(polygons_sf, fg)
+dim(A)  # nrow(polygons_sf) x 13350
 }
 
 }
