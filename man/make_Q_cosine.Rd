@@ -11,7 +11,8 @@ make_Q_cosine(
   m2 = m1,
   h = NULL,
   domain_bbox = NULL,
-  K = NULL
+  K = NULL,
+  sort = NULL
 )
 }
 \arguments{

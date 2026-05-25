@@ -251,3 +251,57 @@ make_Q_cosine <- function(kappa2, sigma2_M_scale, m1, m2 = m1,
     h     = h
   )
 }
+
+# ── replace make_Q_cosine with sort-aware version ─────────────────────────────
+# (redefine to override the version above)
+make_Q_cosine <- function(kappa2, sigma2_M_scale, m1, m2 = m1,
+                          h = NULL, domain_bbox = NULL, K = NULL,
+                          sort = NULL) {
+  if (!is.numeric(kappa2) || length(kappa2) != 1L || kappa2 <= 0)
+    stop("`kappa2` must be a positive scalar.")
+  if (!is.numeric(sigma2_M_scale) || length(sigma2_M_scale) != 1L ||
+      sigma2_M_scale <= 0)
+    stop("`sigma2_M_scale` must be a positive scalar.")
+  if (!is.numeric(m1) || m1 < 1L)
+    stop("`m1` must be a positive integer.")
+  if (!is.numeric(m2) || m2 < 1L)
+    stop("`m2` must be a positive integer.")
+
+  h <- .resolve_h(h, domain_bbox, m1, m2)
+
+  Lx <- m1 * h
+  Ly <- m2 * h
+  sigma2_M_phys <- sigma2_M_scale * Lx * Ly
+
+  full_basis <- is.null(K) || as.integer(K) >= m1 * m2
+  if (is.null(K)) K <- m1 * m2
+  K <- min(as.integer(K), m1 * m2)
+
+  # Default: no sort when using full basis (matches fourier_freq_grid order).
+  # Force sort when K < m so we can select the top-K highest-variance modes.
+  if (is.null(sort)) sort <- !full_basis
+
+  # Enumerate in expand.grid(j1, j2) order: j1 varies fastest.
+  # This matches fourier_freq_grid(J1, J2, domain_bbox) column ordering,
+  # so Q diagonal entry k corresponds to A_f column k out of the box.
+  modes <- do.call(rbind, lapply(seq_len(m2), function(j2)
+    do.call(rbind, lapply(seq_len(m1), function(j1) {
+      lam_D     <- pi^2 * ((j1 - 1L)^2 / Lx^2 + (j2 - 1L)^2 / Ly^2)
+      q         <- (kappa2 + lam_D)^2 / sigma2_M_phys
+      prior_var <- 1 / q
+      data.frame(j1 = as.integer(j1), j2 = as.integer(j2),
+                 lam_D = lam_D, prior_var = prior_var, q = q)
+    }))))
+
+  if (sort) {
+    modes <- modes[order(modes$q), ]
+    rownames(modes) <- NULL
+  }
+  modes <- modes[seq_len(K), ]
+
+  list(
+    Q     = Matrix::Diagonal(x = modes$q),
+    modes = modes,
+    h     = h
+  )
+}
