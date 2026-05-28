@@ -36,19 +36,16 @@ sar_to_matern(
 
 \item{m2}{Number of grid cols (for square-pixel check).}
 
-\item{sigma_sar2}{Positive numeric. SAR marginal variance.}
+\item{sigma2_sar}{Positive numeric. SAR marginal field variance (= phi*sigma2e).}
 
-\item{delta}{Positive numeric. Grid spacing (CRS units).}
+\item{delta}{Positive numeric. Pixel size in CRS units.}
 }
 \value{
-Named list with elements \code{range} and \code{sigma_m2}.
+Named list: kappa2, range, sigma2_M, eff_range.
 
 Named list: \code{kappa2}, \code{sigma2_M_scale}, \code{eff_range}, \code{h}.
 }
 \description{
-Converts SAR (rook neighbors, nu=1) parameters to equivalent Matern(nu=1)
-parameters, using the exact discrete-Laplacian correspondence.
-
 Uses the spectral matching from Table 2.1 to convert SAR prior shape
 parameters to Matérn SPDE parameters.
 }
@@ -58,7 +55,5 @@ parameters to Matérn SPDE parameters.
 \code{sigma2_SAR_scale = phi * sigma2e / tau}.
 }
 \seealso{
-\code{\link[=matern_to_sar]{matern_to_sar()}}
-
 \code{\link{matern_to_sar}}, \code{\link{make_Q_cosine}}
 }

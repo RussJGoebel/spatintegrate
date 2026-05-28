@@ -38,24 +38,20 @@ matern_to_sar(
 
 \item{range}{Positive numeric. Matern range (CRS units).}
 
-\item{sigma2}{Positive numeric. Matern marginal variance.}
+\item{sigma2_M}{Positive numeric. Matern marginal variance.}
 
-\item{delta}{Positive numeric. Grid spacing (CRS units).}
+\item{delta}{Positive numeric. Pixel size in CRS units.}
 }
 \value{
-Named list with elements \code{rho} and \code{tau2}.
+Named list: rho, sigma2_sar.
 
 Named list: \code{rho}, \code{sigma2_SAR_scale}, \code{eff_range}, \code{h}.
 }
 \description{
-Converts Matern(nu=1) parameters to equivalent SAR (rook neighbors) parameters
-on a regular grid with spacing \code{delta}, using the exact correspondence
-between the discrete Laplacian and the SPDE (kappa^2 - Delta)u = W.
+Inverse of sar_to_matern().
 
 Inverse of \code{\link{sar_to_matern}}.
 }
 \seealso{
-\code{\link[=sar_to_matern]{sar_to_matern()}}
-
 \code{\link{sar_to_matern}}, \code{\link{make_Q_cosine}}
 }

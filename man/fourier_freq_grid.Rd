@@ -7,78 +7,41 @@
 fourier_freq_grid(J1, J2 = J1, domain_bbox)
 }
 \arguments{
-\item{J1}{Positive integer. Number of frequency components in the \eqn{x}
-direction. For a raster grid use \code{J1 = m1}.}
+\item{J1}{Positive integer. Frequency count in x (columns).
+For full raster basis use J1 = m2.}
 
-\item{J2}{Positive integer. Number of frequency components in the \eqn{y}
-direction. For a raster grid use \code{J2 = m2}.
-Default \code{J1} (square grid).}
+\item{J2}{Positive integer. Frequency count in y (rows).
+Default J1. For full raster basis use J2 = m1.}
 
-\item{domain_bbox}{Length-4 numeric vector
-\eqn{(x_{\min}, y_{\min}, x_{\max}, y_{\max})} in the projected CRS.}
+\item{domain_bbox}{Length-4 numeric (xmin, ymin, xmax, ymax).}
 }
 \value{
-A list with elements:
-\describe{
-\item{\code{omega_mat}}{A \eqn{J_1 J_2 \times 2} matrix of angular
-frequencies in CRS units (radians per CRS unit).}
-\item{\code{indices}}{A \eqn{J_1 J_2 \times 2} integer matrix of
-\eqn{(j_1, j_2)} index pairs, \eqn{j_1} varying fastest.}
-\item{\code{norm_const}}{Length-\eqn{J_1 J_2} vector of physical-unit
-normalisation constants \eqn{c^{(1)}_{j_1} \cdot c^{(2)}_{j_2}}.}
-\item{\code{J1}, \code{J2}}{The frequency counts used.}
-\item{\code{domain_bbox}}{The supplied bounding box.}
-}
+A list with: omega_mat (K x 2), indices (K x 2), norm_const (K),
+J1, J2, domain_bbox.
 }
 \description{
-Constructs the index matrix and corresponding angular frequency vectors for
-the 2D Neumann cosine basis on a rectangular domain, matching the
-eigenfunctions of the Laplacian under Neumann boundary conditions.
+Constructs the mode index table, angular frequencies, and normalisation
+constants for the 2D Neumann cosine basis on \link{0,Lx} x \link{0,Ly}.
 }
 \details{
-The basis functions are orthonormal under the physical L2 inner product on
-\eqn{[0,L_x] \times [0,L_y]}:
-\deqn{
-  \phi_{\mathbf{j}}(s)
-  = c^{(1)}_{j_1} c^{(2)}_{j_2}
-    \cos\!\big((j_1 - 1)\pi\, s_x / L_x\big)
-    \cos\!\big((j_2 - 1)\pi\, s_y / L_y\big)
+Coordinate convention: j1 indexes the x-direction (columns,
+Lx = bbox\link{3}-bbox\link{1}); j2 indexes the y-direction (rows,
+Ly = bbox\link{4}-bbox\link{2}). For a raster grid with m1 rows, m2 columns,
+pixel size delta, call fourier_freq_grid(J1 = m2, J2 = m1, domain_bbox).
+
+Mode ordering: expand.grid(j1 = 1:J1, j2 = 1:J2), j1 varies fastest.
+Column k of A from fourier_integrate_basis() corresponds to diagonal
+entry k of Q from fourier_sar_Q() in fourier_prior.R.
+
+Normalisation: integral phi_{j1,j2}(s)^2 ds = 1 on \link{0,Lx}x\link{0,Ly}.
 }
-where the normalisation constants are
-\eqn{c^{(k)}_1 = 1/\sqrt{L_k}} (constant mode) and
-\eqn{c^{(k)}_j = \sqrt{2/L_k}} for \eqn{j \geq 2} (non-constant modes).
-
-This ensures \eqn{\int \phi_j(s)^2 \, ds = 1} for all \eqn{j}, and at the
-discrete level \eqn{h^2 \Phi^\top \Phi = I} where \eqn{h} is the pixel size.
-This normalisation matches \code{make_Q_cosine()} in \code{sar_matern.R}.
-
-For a square grid (\eqn{J_1 = J_2 = J}) this is equivalent to the
-previous single-\code{J} interface. For a rectangular \eqn{m_1 \times m_2}
-raster grid use \code{J1 = m1}, \code{J2 = m2} to get exactly
-\eqn{m_1 m_2} modes with no wasted columns.
-}
-\section{Mode ordering}{
-
-Modes are enumerated by \code{expand.grid(j1 = 1:J1, j2 = 1:J2)},
-so \eqn{j_1} varies fastest. This matches the ordering used by
-\code{make_Q_cosine()} in \code{sar_matern.R}, guaranteeing that column
-\eqn{k} of the design matrix \eqn{A} from \code{\link{fourier_integrate_basis}}
-corresponds to diagonal entry \eqn{k} of \eqn{Q} from \code{make_Q_cosine()}.
-}
-
 \examples{
-# Square grid
-bbox <- c(0, 0, 200e3, 200e3)
-fg   <- fourier_freq_grid(J1 = 5, domain_bbox = bbox)
-fg$indices    # 25 x 2 integer matrix
-fg$omega_mat  # 25 x 2 angular frequency matrix
-
-# Rectangular raster grid: 89 rows x 150 cols, h = 330m
-bbox_rect <- c(0, 0, 89 * 330, 150 * 330)
-fg_rect   <- fourier_freq_grid(J1 = 89, J2 = 150, domain_bbox = bbox_rect)
-nrow(fg_rect$omega_mat)  # 89 * 150 = 13350
+# m1=128 rows, m2=170 cols, delta=330m
+bbox <- c(304971, 4666232, 304971 + 170*330, 4666232 + 128*330)
+fg   <- fourier_freq_grid(J1 = 170, J2 = 128, domain_bbox = bbox)
+nrow(fg$omega_mat)  # 170 * 128 = 21760
 
 }
 \seealso{
-\code{\link[=fourier_integrate_basis]{fourier_integrate_basis()}}, \code{make_Q_cosine()} in sar_matern.R
+fourier_integrate_basis, fourier_sar_Q (fourier_prior.R)
 }

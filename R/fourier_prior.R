@@ -1,302 +1,289 @@
 # fourier_prior.R
+#
 # Prior precision constructors for the Fourier basis, compatible with
-# fastblm::tune_ml.
+# fastblm::fit_fastblm and fastblm::tune_cv.
 #
-# The Fourier basis diagonalises any stationary covariance, so Q is always
-# diagonal. Two prior families are supported:
+# fastblm convention
+# ------------------
+# Posterior precision: A'A + (1/phi) * Q
+# Prior:              beta ~ N(0, phi * sigma2e * Q^{-1})
+# Therefore:          phi = sigma2b / sigma2e  (larger phi = weaker prior)
 #
-#   Matern (nu = 1):  parameters (range, sigma2)
-#   SAR (rook, nu=1): parameters (rho, tau2, delta)
+# SAR-Fourier matching
+# --------------------
+# The SAR model (I - rho*W)y = e has precision Q_SAR = (I-rhoW)'(I-rhoW).
+# Its eigenfunctions are the Neumann cosines; eigenvalue for mode k is:
 #
-# Both families are internally the same model — the SAR constructor converts
-# to Matern parameters first via exact formulas derived from matching the
-# discrete Laplacian (rook neighbors) to the SPDE (kappa^2 - Delta)u = W.
+#   (1 - rho * lambda_W[k])^2
 #
-# Conversion formulas (nu = 1, d = 2):
+# where lambda_W[k] = 0.5*(cos(omega_x[k]*delta) + cos(omega_y[k]*delta))
+# is the exact discrete Laplacian eigenvalue at the physical frequency.
 #
-# From the discrete Laplacian / SPDE matching (Chapter 5, Table 1):
+# The matched Fourier prior precision diagonal is:
 #
-#   kappa^2      = (2d/h^2) * (1-rho)/rho = 4*(1-rho)/(rho*delta^2)
-#   sigma_SAR^2  = sigma_M^2 * h^2 / (kappa^2 + 4/h^2)^2
-#                = sigma_M^2 * delta^2 / (kappa^2 + 4/delta^2)^2
+#   Q_f[k] = n_cells * (1 - rho * lambda_W[k])^2
 #
-# and the inverse:
+# where n_cells = (Lx/delta) * (Ly/delta) = m1*m2.
+# The factor n_cells accounts for the physical L2 normalisation of the
+# basis (integral phi_k^2 ds = 1) vs the discrete SAR convention.
 #
-#   range   = sqrt(8 / kappa^2)   [kappa^2 = 8/range^2 convention]
-#   rho     = (4/delta^2) / (kappa^2 + 4/delta^2)
-#   sigma_M^2 = sigma_SAR^2 * (kappa^2 + 4/delta^2)^2 / delta^2
+# The same phi from the SAR fit transfers directly to the Fourier model
+# after converting via sar_phi_to_fourier_phi():
 #
-# Note: sigma_SAR^2 here is the marginal variance of y (the grid vector),
-# which differs from sigma_M^2 by a factor of delta^2 due to the
-# vector vs function norm difference (see dissertation Chapter 5).
+#   phi_fourier = phi_sar * 16 * (Lx * Ly) / (rho^2 * delta^2)
 #
-# PATCH NOTE (fourier_matern_Q_fun):
-# The Fourier basis functions phi_j are orthonormal on the continuous domain
-# [0,Lx] x [0,Ly] in the L2 sense: integral phi_j^2 ds = 1.
-# The Matern eigenvalues lambda_j = sigma2_M * (kappa^2 + omega_j^2)^{-alpha}
-# are in "function space". When fit_fastblm fits coefficients beta via
-# y = A_f beta + eps, the prior variance on beta_j must account for the
-# domain area: Var[beta_j] = lambda_j * domain_area.
-# Without this scaling, the prior is domain_area times too weak, producing
-# large high-frequency coefficients that corrupt pointwise predictions.
-# Fix: multiply eigenvalues by Lx*Ly inside fourier_matern_Q_fun.
+# This converts the SAR signal-to-noise ratio to the equivalent Matern
+# signal-to-noise ratio, accounting for the sigma_SAR -> sigma_M conversion.
+# sigma2e cancels in the conversion so it is not needed.
+#
+# Workflow
+# --------
+#   # 1. Fit SAR model, get phi_hat
+#   cv      <- tune_cv(y, A, Q_fun_sar, ...)
+#   phi_sar <- cv$phi
+#
+#   # 2. Build frequency grid (J1=m2 cols, J2=m1 rows)
+#   fg <- fourier_freq_grid(J1=m2, J2=m1, domain_bbox=bbox)
+#
+#   # 3. Build matched Q and convert phi
+#   Q_f         <- fourier_sar_Q(fg, rho=rho_hat, delta=delta)
+#   phi_fourier <- sar_phi_to_fourier_phi(phi_sar, rho=rho_hat, delta=delta)
+#
+#   # 4. Fit Fourier model
+#   q_diag <- diag(Q_f)
+#   fit_f  <- fit_fastblm(y, A_f, Q_f, phi=phi_fourier,
+#                         solver="woodbury", Q_inv=function(v) v/q_diag)
 
 
 # ------------------------------------------------------------------------------
 # Parameter conversions
 # ------------------------------------------------------------------------------
 
-#' Convert Matern Parameters to SAR Parameters
+#' Convert SAR phi to Fourier phi
 #'
-#' Converts Matern(nu=1) parameters to equivalent SAR (rook neighbors) parameters
-#' on a regular grid with spacing \code{delta}, using the exact correspondence
-#' between the discrete Laplacian and the SPDE (kappa^2 - Delta)u = W.
+#' Converts the signal-to-noise ratio phi from a SAR model to the equivalent
+#' phi for the matched Fourier-Matern model. The conversion uses the
+#' SAR-to-Matern amplitude relationship:
 #'
-#' @param range Positive numeric. Matern range (CRS units).
-#' @param sigma2 Positive numeric. Matern marginal variance.
-#' @param delta Positive numeric. Grid spacing (CRS units).
+#'   sigma2_M = sigma2_SAR * (4 / (rho * delta^2))^2
 #'
-#' @return Named list with elements \code{rho} and \code{tau2}.
-#' @seealso [sar_to_matern()]
+#' Since phi = sigma2b / sigma2e and sigma2e cancels, this gives:
+#'
+#'   phi_fourier = phi_sar * 16 * (Lx * Ly) / (rho^2 * delta^2)
+#'
+#' @param phi_sar Positive numeric. phi from SAR CV fit.
+#' @param rho     Numeric in (0,1). SAR spatial autoregression parameter.
+#' @param delta   Positive numeric. Pixel size in CRS units.
+#'
+#' @return Positive numeric. phi for the Fourier model.
+#'
+#' @seealso fourier_sar_Q
+#'
+#' @examples
+#' phi_fourier <- sar_phi_to_fourier_phi(phi_sar=185, rho=0.95, delta=330, freq_grid=fg)
+#'
 #' @export
-matern_to_sar <- function(range, sigma2, delta) {
-  if (!is.numeric(range)  || range  <= 0) stop("`range` must be a positive scalar.")
-  if (!is.numeric(sigma2) || sigma2 <= 0) stop("`sigma2` must be a positive scalar.")
-  if (!is.numeric(delta)  || delta  <= 0) stop("`delta` must be a positive scalar.")
-  kappa2   <- 8 / range^2
-  rho      <- (4 / delta^2) / (kappa2 + 4 / delta^2)
-  # sigma_SAR^2 = sigma_M^2 * delta^2 / (kappa^2 + 4/delta^2)^2
-  sigma_sar2 <- sigma2 * delta^2 / (kappa2 + 4 / delta^2)^2
-  list(rho = rho, sigma_sar2 = sigma_sar2)
+sar_phi_to_fourier_phi <- function(phi_sar, rho, delta, freq_grid) {
+  if (!is.numeric(phi_sar) || phi_sar <= 0)
+    stop("`phi_sar` must be a positive scalar.")
+  if (!is.numeric(rho) || rho <= 0 || rho >= 1)
+    stop("`rho` must be in (0, 1).")
+  if (!is.numeric(delta) || delta <= 0)
+    stop("`delta` must be a positive scalar.")
+  if (!is.list(freq_grid) || is.null(freq_grid$domain_bbox))
+    stop("`freq_grid` must be a list from fourier_freq_grid().")
+
+  Lx <- freq_grid$domain_bbox[3L] - freq_grid$domain_bbox[1L]
+  Ly <- freq_grid$domain_bbox[4L] - freq_grid$domain_bbox[2L]
+
+  phi_sar * 16 * Lx * Ly / (rho^2 * delta^2)
+}
+
+
+#' Convert Fourier phi back to SAR phi
+#'
+#' Inverse of sar_phi_to_fourier_phi().
+#'
+#' @param phi_fourier Positive numeric. phi from Fourier model.
+#' @param rho         Numeric in (0,1). SAR spatial autoregression parameter.
+#' @param delta       Positive numeric. Pixel size in CRS units.
+#'
+#' @return Positive numeric. Equivalent SAR phi.
+#'
+#' @export
+fourier_phi_to_sar_phi <- function(phi_fourier, rho, delta, freq_grid) {
+  if (!is.numeric(phi_fourier) || phi_fourier <= 0)
+    stop("`phi_fourier` must be a positive scalar.")
+  if (!is.numeric(rho) || rho <= 0 || rho >= 1)
+    stop("`rho` must be in (0, 1).")
+  if (!is.numeric(delta) || delta <= 0)
+    stop("`delta` must be a positive scalar.")
+  if (!is.list(freq_grid) || is.null(freq_grid$domain_bbox))
+    stop("`freq_grid` must be a list from fourier_freq_grid().")
+
+  Lx <- freq_grid$domain_bbox[3L] - freq_grid$domain_bbox[1L]
+  Ly <- freq_grid$domain_bbox[4L] - freq_grid$domain_bbox[2L]
+
+  phi_fourier * rho^2 * delta^2 / (16 * Lx * Ly)
 }
 
 
 #' Convert SAR Parameters to Matern Parameters
 #'
-#' Converts SAR (rook neighbors, nu=1) parameters to equivalent Matern(nu=1)
-#' parameters, using the exact discrete-Laplacian correspondence.
+#' @param rho      Numeric in (0,1). SAR spatial autoregression parameter.
+#' @param sigma2_sar Positive numeric. SAR marginal field variance (= phi*sigma2e).
+#' @param delta    Positive numeric. Pixel size in CRS units.
 #'
-#' @param rho Numeric in (0, 1). SAR spatial autoregression parameter.
-#' @param sigma_sar2 Positive numeric. SAR marginal variance.
-#' @param delta Positive numeric. Grid spacing (CRS units).
+#' @return Named list: kappa2, range, sigma2_M, eff_range.
 #'
-#' @return Named list with elements \code{range} and \code{sigma_m2}.
-#' @seealso [matern_to_sar()]
 #' @export
-sar_to_matern <- function(rho, sigma_sar2, delta) {
-  if (!is.numeric(rho)       || rho       <= 0 || rho       >= 1) stop("`rho` must be in (0, 1).")
-  if (!is.numeric(sigma_sar2)|| sigma_sar2 <= 0)                  stop("`sigma_sar2` must be a positive scalar.")
-  if (!is.numeric(delta)     || delta      <= 0)                  stop("`delta` must be a positive scalar.")
+sar_to_matern <- function(rho, sigma2_sar, delta) {
+  if (!is.numeric(rho)       || rho       <= 0 || rho >= 1)
+    stop("`rho` must be in (0, 1).")
+  if (!is.numeric(sigma2_sar)|| sigma2_sar <= 0)
+    stop("`sigma2_sar` must be a positive scalar.")
+  if (!is.numeric(delta)     || delta <= 0)
+    stop("`delta` must be a positive scalar.")
+
   kappa2   <- 4 * (1 - rho) / (rho * delta^2)
-  range    <- sqrt(8 / kappa2)
   # sigma_M^2 = sigma_SAR^2 * (kappa^2 + 4/delta^2)^2 / delta^2
-  sigma_m2 <- sigma_sar2 * (kappa2 + 4 / delta^2)^2 / delta^2
-  list(range = range, sigma_m2 = sigma_m2)
-}
-
-
-# ------------------------------------------------------------------------------
-# Matern eigenvalues for the Neumann cosine basis (dissertation Chapter 4)
-# ------------------------------------------------------------------------------
-
-.matern_eigenvalues <- function(omega_sq, range, sigma2, nu) {
-  kappa2 <- 8 / range^2
-  alpha  <- nu + 1L          # nu + d/2, d = 2
-  sigma2 * (kappa2 + omega_sq)^(-alpha)
-}
-
-
-# ------------------------------------------------------------------------------
-
-#' Build a Q_fun for a Matern(nu=1) Prior over a Fourier Basis
-#'
-#' Returns a callable object compatible with fastblm::tune_ml() that constructs
-#' the diagonal prior precision matrix Q for a Fourier basis under a
-#' Matern(nu=1) covariance.
-#'
-#' Parameters tuned by tune_ml: log_range, log_sigma2.
-#'
-#' @param freq_grid A list from [fourier_freq_grid()].
-#' @param nu Positive numeric. Matern smoothness. Default 1.
-#' @param dc_precision Positive numeric. Precision at the constant term. Default 1e-6.
-#'
-#' @return Callable object of class fourier_matern_Q_fun.
-#' @seealso [fourier_sar_Q_fun()], [summarize_prior()], [matern_to_sar()]
-#' @export
-fourier_matern_Q_fun <- function(freq_grid, nu = 1, dc_precision = 1e-6) {
-  if (!is.list(freq_grid) || is.null(freq_grid$omega_mat))
-    stop("`freq_grid` must be a list from fourier_freq_grid().")
-  if (!is.numeric(nu) || nu <= 0)
-    stop("`nu` must be a positive numeric scalar.")
-  if (!is.numeric(dc_precision) || dc_precision <= 0)
-    stop("`dc_precision` must be a positive numeric scalar.")
-
-  omega_sq <- freq_grid$omega_mat[, 1L]^2 + freq_grid$omega_mat[, 2L]^2
-  is_dc    <- omega_sq == 0
-
-  # Domain area: scales eigenvalues from function-space to coefficient-space.
-  # The Fourier basis is orthonormal on [0,Lx]x[0,Ly] in L2, so the prior
-  # variance on coefficient beta_j equals the function-space eigenvalue
-  # times the domain area Lx*Ly.
-  Lx          <- freq_grid$domain_bbox[3L] - freq_grid$domain_bbox[1L]
-  Ly          <- freq_grid$domain_bbox[4L] - freq_grid$domain_bbox[2L]
-  domain_area <- Lx * Ly
-
-  fn <- function(theta) {
-    range  <- exp(theta[["log_range"]])
-    sigma2 <- exp(theta[["log_sigma2"]])
-    eigs        <- .matern_eigenvalues(omega_sq, range, sigma2, nu)
-    eigs        <- eigs * domain_area   # convert function-space -> coefficient-space
-    eigs[is_dc] <- 1 / dc_precision
-    q_diag    <- 1 / eigs
-    Q         <- Matrix::Diagonal(x = q_diag)
-    log_det_Q <- sum(log(q_diag))
-    list(Q = Q, log_det_Q = log_det_Q)
-  }
-
-  structure(fn,
-            class        = "fourier_matern_Q_fun",
-            freq_grid    = freq_grid,
-            nu           = nu,
-            dc_precision = dc_precision,
-            param_names  = c("log_range", "log_sigma2")
+  # The /delta^2 converts from discrete (vector) variance to
+  # continuous (function) variance.
+  sigma2_M <- sigma2_sar * (kappa2 + 4 / delta^2)^2 / delta^2
+  list(
+    kappa2    = kappa2,
+    range     = sqrt(8 / kappa2),
+    sigma2_M  = sigma2_M,
+    eff_range = sqrt(8 / kappa2)
   )
 }
 
 
-#' Build a Q_fun for a SAR(rook, nu=1) Prior over a Fourier Basis
+#' Convert Matern Parameters to SAR Parameters
 #'
-#' Returns a callable object compatible with fastblm::tune_ml() that constructs
-#' the diagonal prior precision matrix Q for a Fourier basis under a SAR
-#' (rook neighbors) prior. Internally converts SAR to Matern(nu=1) via exact
-#' formulas, so fitted parameters can be reported in both parameterizations
-#' via summarize_prior().
+#' Inverse of sar_to_matern().
 #'
-#' Parameters tuned by tune_ml: logit_rho, log_tau2.
+#' @param range    Positive numeric. Matern range (CRS units).
+#' @param sigma2_M Positive numeric. Matern marginal variance.
+#' @param delta    Positive numeric. Pixel size in CRS units.
 #'
-#' @param freq_grid A list from [fourier_freq_grid()].
-#' @param delta Positive numeric. Grid spacing (CRS units) of the SAR model
-#'   being matched.
-#' @param dc_precision Positive numeric. Precision at the constant term. Default 1e-6.
+#' @return Named list: rho, sigma2_sar.
 #'
-#' @return Callable object of class fourier_sar_Q_fun.
-#' @seealso [fourier_matern_Q_fun()], [summarize_prior()], [sar_to_matern()]
 #' @export
-fourier_sar_Q_fun <- function(freq_grid, delta, dc_precision = NULL) {
+matern_to_sar <- function(range, sigma2_M, delta) {
+  if (!is.numeric(range)   || range   <= 0) stop("`range` must be positive.")
+  if (!is.numeric(sigma2_M)|| sigma2_M <= 0) stop("`sigma2_M` must be positive.")
+  if (!is.numeric(delta)   || delta   <= 0) stop("`delta` must be positive.")
+
+  kappa2     <- 8 / range^2
+  rho        <- (4 / delta^2) / (kappa2 + 4 / delta^2)
+  sigma2_sar <- sigma2_M * delta^2 / (kappa2 + 4 / delta^2)^2
+  list(rho = rho, sigma2_sar = sigma2_sar)
+}
+
+
+# ------------------------------------------------------------------------------
+# Prior precision constructors
+# ------------------------------------------------------------------------------
+
+#' Build Matched SAR-Fourier Prior Precision Matrix
+#'
+#' Constructs the diagonal prior precision matrix Q_f for the Fourier basis
+#' matched to a SAR(rook) prior. Uses the exact discrete Laplacian eigenvalues
+#' rather than the continuous Matern approximation, giving exact spectral
+#' matching at all frequencies.
+#'
+#' The diagonal entries are:
+#'
+#'   Q_f[k] = n_cells * (1 - rho * lambda_W[k])^2
+#'
+#' where:
+#'   n_cells    = (Lx/delta) * (Ly/delta)  =  m1 * m2
+#'   lambda_W[k] = 0.5 * (cos(omega_x[k]*delta) + cos(omega_y[k]*delta))
+#'
+#' lambda_W[k] is the exact eigenvalue of the row-normalised rook weight
+#' matrix W at the continuous frequency (omega_x[k], omega_y[k]).
+#'
+#' Use with phi = sar_phi_to_fourier_phi(phi_sar, rho, delta).
+#'
+#' @param freq_grid List from fourier_freq_grid(J1=m2, J2=m1, domain_bbox).
+#' @param rho       Numeric in (0,1). SAR spatial autoregression parameter.
+#' @param delta     Positive numeric. Pixel size in CRS units.
+#'
+#' @return A diagonal sparse Matrix of class ddiMatrix, dimension K x K.
+#'
+#' @seealso sar_phi_to_fourier_phi, fourier_freq_grid
+#'
+#' @examples
+#' bbox <- c(0, 0, 170*330, 128*330)
+#' fg   <- fourier_freq_grid(J1=170, J2=128, domain_bbox=bbox)
+#' Q_f  <- fourier_sar_Q(fg, rho=0.95, delta=330)
+#' # phi_f <- sar_phi_to_fourier_phi(phi_sar, rho=0.95, delta=330, freq_grid=fg)
+#' # fit   <- fit_fastblm(y, A_f, Q_f, phi=phi_f, solver="woodbury",
+#' #                      Q_inv=function(v) v/diag(Q_f))
+#'
+#' @export
+fourier_sar_Q <- function(freq_grid, rho, delta) {
   if (!is.list(freq_grid) || is.null(freq_grid$omega_mat))
     stop("`freq_grid` must be a list from fourier_freq_grid().")
+  if (!is.numeric(rho) || length(rho) != 1L || rho <= 0 || rho >= 1)
+    stop("`rho` must be a scalar in (0, 1).")
   if (!is.numeric(delta) || length(delta) != 1L || delta <= 0)
-    stop("`delta` must be a positive numeric scalar.")
+    stop("`delta` must be a positive scalar.")
 
   omega_x  <- freq_grid$omega_mat[, 1L]
   omega_y  <- freq_grid$omega_mat[, 2L]
+
+  # Exact discrete Laplacian eigenvalue of row-normalised rook W at frequency k
   lambda_W <- 0.5 * (cos(omega_x * delta) + cos(omega_y * delta))
 
-  Lx <- freq_grid$domain_bbox[3L] - freq_grid$domain_bbox[1L]
-  Ly <- freq_grid$domain_bbox[4L] - freq_grid$domain_bbox[2L]
+  # Shape only -- no n_cells factor. Amplitude is carried by phi_fourier
+  # from sar_phi_to_fourier_phi().
+  q_diag <- (1 - rho * lambda_W)^2
+
+  Matrix::Diagonal(x = q_diag)
+}
+
+
+#' Build Matern-Fourier Prior Precision Matrix
+#'
+#' Constructs the diagonal prior precision matrix Q_f for the Fourier basis
+#' under a Matern(nu=1) prior. Uses the continuous spectral eigenvalues.
+#'
+#' The diagonal entries are:
+#'
+#'   Q_f[k] = n_cells * (kappa^2 + omega_sq[k])^2
+#'
+#' where n_cells = (Lx/delta)*(Ly/delta) and kappa^2 = 8/range^2.
+#'
+#' Use with phi = phi_M where phi_M = sigma2_M / sigma2e.
+#' To convert from a SAR fit: phi_M = sar_phi_to_fourier_phi(phi_sar, rho, delta).
+#'
+#' @param freq_grid List from fourier_freq_grid().
+#' @param range     Positive numeric. Matern range (CRS units).
+#' @param delta     Positive numeric. Pixel size in CRS units.
+#'
+#' @return A diagonal sparse Matrix of class ddiMatrix, dimension K x K.
+#'
+#' @seealso fourier_sar_Q, sar_phi_to_fourier_phi
+#'
+#' @export
+fourier_matern_Q <- function(freq_grid, range, delta) {
+  if (!is.list(freq_grid) || is.null(freq_grid$omega_mat))
+    stop("`freq_grid` must be a list from fourier_freq_grid().")
+  if (!is.numeric(range) || length(range) != 1L || range <= 0)
+    stop("`range` must be a positive scalar.")
+  if (!is.numeric(delta) || length(delta) != 1L || delta <= 0)
+    stop("`delta` must be a positive scalar.")
+
+  Lx      <- freq_grid$domain_bbox[3L] - freq_grid$domain_bbox[1L]
+  Ly      <- freq_grid$domain_bbox[4L] - freq_grid$domain_bbox[2L]
   n_cells <- (Lx / delta) * (Ly / delta)
 
-  fn <- function(theta) {
-    rho  <- 1 / (1 + exp(-theta[["logit_rho"]]))
-    tau2 <- exp(theta[["log_tau2"]])
-    q_diag    <- n_cells * (1 - rho * lambda_W)^2 / tau2
-    Q         <- Matrix::Diagonal(x = q_diag)
-    log_det_Q <- sum(log(q_diag))
-    list(Q = Q, log_det_Q = log_det_Q)
-  }
+  kappa2   <- 8 / range^2
+  omega_sq <- freq_grid$omega_mat[, 1L]^2 + freq_grid$omega_mat[, 2L]^2
 
-  structure(fn,
-            class       = "fourier_sar_Q_fun",
-            freq_grid   = freq_grid,
-            delta       = delta,
-            param_names = c("logit_rho", "log_tau2")
-  )
-}
+  q_diag <- n_cells * (kappa2 + omega_sq)^2
 
-
-# ------------------------------------------------------------------------------
-# Print and summarize
-# ------------------------------------------------------------------------------
-
-#' @export
-print.fourier_matern_Q_fun <- function(x, ...) {
-  freqs <- attr(x, "freqs")
-  cat("Fourier Matern(nu=1) Q_fun\n")
-  cat("  frequencies :", nrow(freqs), "(", 2L * nrow(freqs), "columns in A)\n")
-  cat("  tune via    : log_range, log_sigma2\n")
-  cat("  use summarize_prior(Q_fun, fit$theta) after fitting\n")
-  invisible(x)
-}
-
-#' @export
-print.fourier_sar_Q_fun <- function(x, ...) {
-  fg <- attr(x, "freq_grid")
-  cat("Fourier SAR(rook, nu=1) Q_fun\n")
-  cat("  delta       :", attr(x, "delta"), "(CRS units)\n")
-  cat("  basis fns   :", nrow(fg$omega_mat), "\n")
-  cat("  tune via    : logit_rho, log_sigma2\n")
-  cat("  use summarize_prior(Q_fun, fit$theta) after fitting\n")
-  invisible(x)
-}
-
-
-#' Summarize a Fitted Fourier Prior
-#'
-#' Given a Q_fun and fitted theta from fastblm::tune_ml(), prints parameters
-#' in both Matern(nu=1) and SAR(rook) parameterizations.
-#'
-#' @param Q_fun A fourier_matern_Q_fun or fourier_sar_Q_fun object.
-#' @param theta Named numeric vector of fitted parameters from fit$theta.
-#' @param delta Grid spacing for SAR equivalents. Required for
-#'   fourier_matern_Q_fun; ignored for fourier_sar_Q_fun.
-#'
-#' @return Invisibly returns a list with elements matern and sar.
-#' @export
-summarize_prior <- function(Q_fun, theta, delta = NULL) {
-  UseMethod("summarize_prior")
-}
-
-#' @export
-summarize_prior.fourier_matern_Q_fun <- function(Q_fun, theta, delta = NULL) {
-  range  <- exp(theta[["log_range"]])
-  sigma2 <- exp(theta[["log_sigma2"]])
-
-  cat("Fitted Fourier prior — Matern(nu=1)\n")
-  cat("  --- Matern ---\n")
-  cat(sprintf("  range  : %.1f  (CRS units)\n", range))
-  cat(sprintf("  sigma2 : %.4g\n", sigma2))
-
-  sar <- if (!is.null(delta)) matern_to_sar(range, sigma2, delta) else NULL
-
-  if (!is.null(sar)) {
-    cat(sprintf("  --- SAR equivalent (delta = %.1f) ---\n", delta))
-    cat(sprintf("  rho    : %.4f\n", sar$rho))
-    cat(sprintf("  tau2   : %.4g\n", sar$tau2))
-  } else {
-    cat("  (supply delta to see SAR equivalent)\n")
-  }
-
-  invisible(list(matern = list(range = range, sigma2 = sigma2), sar = sar))
-}
-
-#' @export
-summarize_prior.fourier_sar_Q_fun <- function(Q_fun, theta, delta = NULL) {
-  rho  <- 1 / (1 + exp(-theta[["logit_rho"]]))
-  tau2 <- exp(theta[["log_tau2"]])
-  d    <- attr(Q_fun, "delta")
-
-  matern <- sar_to_matern(rho, tau2, d)
-
-  cat("Fitted Fourier prior — SAR(rook, nu=1)\n")
-  cat(sprintf("  --- SAR (delta = %.1f) ---\n", d))
-  cat(sprintf("  rho      : %.4f\n", rho))
-  cat(sprintf("  tau2     : %.4g\n", tau2))
-  cat("  --- Matern equivalent ---\n")
-  cat(sprintf("  range    : %.1f  (CRS units)\n", matern$range))
-  cat(sprintf("  sigma_M^2: %.4g\n", matern$sigma_m2))
-
-  invisible(list(
-    sar    = list(rho = rho, tau2 = tau2, delta = d),
-    matern = list(range = matern$range, sigma_m2 = matern$sigma_m2)
-  ))
+  Matrix::Diagonal(x = q_diag)
 }

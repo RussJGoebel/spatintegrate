@@ -2,78 +2,35 @@
 % Please edit documentation in R/fourier_integrate.R
 \name{fourier_integrate_basis}
 \alias{fourier_integrate_basis}
-\title{Exact Cosine Basis Integration Over a Set of Polygons}
+\title{Exact Cosine Basis Integration Over Polygons}
 \usage{
 fourier_integrate_basis(polygons_sf, freq_grid, min_area = 0)
 }
 \arguments{
-\item{polygons_sf}{An \code{sf} object in a projected CRS. One row per
-polygon.}
+\item{polygons_sf}{sf object in a projected CRS. One row per polygon.}
 
-\item{freq_grid}{A list returned by \code{\link[=fourier_freq_grid]{fourier_freq_grid()}}.}
+\item{freq_grid}{List from fourier_freq_grid().}
 
-\item{min_area}{Non-negative numeric. Triangles with area \code{<= min_area}
-are skipped. Default \code{0}.}
+\item{min_area}{Non-negative numeric. Triangles with area <= min_area
+are skipped. Default 0.}
 }
 \value{
-A numeric matrix of dimensions \eqn{n \times J_1 J_2}. Columns
-correspond to \eqn{(j_1, j_2)} index pairs in the order returned by
-\code{freq_grid$indices} (\eqn{j_1} varying fastest). Rows for polygons
-producing no valid triangles contain \code{NA}.
+Numeric matrix n x K. Columns in j1-fastest order matching
+freq_grid$indices. Rows for polygons with no valid triangles are NA.
 }
 \description{
-Computes an \eqn{n \times J_1 J_2} matrix \eqn{A} where each entry is the
-normalised area-weighted average of one Neumann cosine basis function over
-one polygon:
+Computes the n x K design matrix A_f where entry (i,k) is the
+area-normalised integral of basis function k over polygon i:
 }
 \details{
-\deqn{
-  A_{i,\mathbf{j}}
-  = \frac{1}{|D_i|}
-    \int_{D_i}
-    \phi_{\mathbf{j}}(s)\, ds
-  = \frac{c^{(1)}_{j_1} c^{(2)}_{j_2}}{|D_i|}
-    \int_{D_i}
-    \cos\!\big((j_1-1)\pi s_x / L_x\big)\,
-    \cos\!\big((j_2-1)\pi s_y / L_y\big)\, ds
-}
+A_f\link{i,k} = (1/|D_i|) * integral_{D_i} phi_k(s) ds
 
-where \eqn{c^{(k)}_{j_k}} are the physical-unit normalisation constants from
-\code{\link{fourier_freq_grid}}, and \eqn{s_x, s_y} are coordinates relative
-to the domain origin \eqn{(x_{\min}, y_{\min})} from
-\code{freq_grid$domain_bbox}.
+Integration is exact: each polygon is triangulated and the closed-form
+triangle integral of e^{i*omega.s} is accumulated analytically.
 
-Integration is exact up to floating-point precision: each polygon is
-triangulated and the closed-form integral of \eqn{e^{i\omega\cdot s}} over
-each triangle is accumulated analytically. No quadrature error is introduced.
-}
-\section{Coordinate shifting}{
-
-Triangle coordinates are shifted to domain-local frame
-\eqn{[0, L_x] \times [0, L_y]} before integration, using the origin stored
-in \code{freq_grid$domain_bbox}. This means \code{polygons_sf} may be in
-any absolute projected CRS — only the bounding box passed to
-\code{fourier_freq_grid()} needs to match the extent of the data.
-}
-
-\section{Note on separability}{
-
-The 2D cosine basis is separable:
-\eqn{\phi_{j_1,j_2}(s) = \phi_{j_1}(s_x)\,\phi_{j_2}(s_y)}.
-The integral over an arbitrary polygon is \emph{not} separable (the
-polygon shape couples the two dimensions), so integration is performed
-jointly over both dimensions using triangle decomposition.
-}
-
-\examples{
-\dontrun{
-bbox <- as.vector(sf::st_bbox(polygons_sf))
-fg   <- fourier_freq_grid(J1 = 89, J2 = 150, domain_bbox = bbox)
-A    <- fourier_integrate_basis(polygons_sf, fg)
-dim(A)  # nrow(polygons_sf) x 13350
-}
-
+Polygon coordinates are shifted to domain-local frame \link{0,Lx}x\link{0,Ly}
+using freq_grid$domain_bbox before integration.
 }
 \seealso{
-\code{\link[=fourier_freq_grid]{fourier_freq_grid()}}
+fourier_freq_grid
 }
