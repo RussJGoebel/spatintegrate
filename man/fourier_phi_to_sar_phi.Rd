@@ -6,16 +6,6 @@
 \usage{
 fourier_phi_to_sar_phi(phi_fourier, rho, delta, freq_grid)
 }
-\arguments{
-\item{phi_fourier}{Positive numeric. phi from Fourier model.}
-
-\item{rho}{Numeric in (0,1). SAR spatial autoregression parameter.}
-
-\item{delta}{Positive numeric. Pixel size in CRS units.}
-}
-\value{
-Positive numeric. Equivalent SAR phi.
-}
 \description{
-Inverse of sar_phi_to_fourier_phi().
+Convert Fourier phi back to SAR phi
 }

@@ -2,7 +2,7 @@
 % Please edit documentation in R/sar_matern_matching.R
 \name{make_Q_cosine}
 \alias{make_Q_cosine}
-\title{Build the diagonal precision matrix for the Matérn cosine prior}
+\title{Build diagonal prior precision matrix for Matern cosine basis (physical units)}
 \usage{
 make_Q_cosine(
   kappa2,
@@ -11,59 +11,39 @@ make_Q_cosine(
   m2 = m1,
   h = NULL,
   domain_bbox = NULL,
-  K = NULL,
-  sort = NULL
+  K = NULL
 )
 }
 \arguments{
-\item{kappa2}{Squared range in \eqn{1/(\text{CRS units})^2}.}
+\item{kappa2}{kappa^2 in physical units. From sar_to_matern().}
 
-\item{sigma2_M_scale}{Matérn SPDE amplitude scale. From \code{\link{sar_to_matern}}.}
+\item{sigma2_M_scale}{Matern scale. From sar_to_matern().}
 
-\item{m1}{Number of grid rows (max j1 index).}
+\item{m1}{Number of grid rows (J1 in fourier_freq_grid).}
 
-\item{m2}{Number of grid cols (max j2 index). Default \code{m1}.}
+\item{m2}{Number of grid cols (J2). Default m1.}
 
-\item{h}{Pixel side length in CRS units. Supply or derive via
-\code{domain_bbox} + \code{m1}.}
+\item{h}{Pixel side length. Supply or derive via domain_bbox+m1.}
 
 \item{domain_bbox}{Length-4 numeric bounding box.}
 
-\item{K}{Modes to retain (by decreasing prior variance).
-Default \code{m1 * m2}.}
+\item{K}{Modes to retain. Default m1*m2 (all).}
 }
 \value{
-Named list:
-\describe{
-\item{\code{Q}}{Diagonal sparse \eqn{K \times K} \code{Matrix}.}
-\item{\code{modes}}{Data frame: \code{j1}, \code{j2}, \code{lam_D},
-\code{prior_var}, \code{q} — ordered by decreasing prior variance.
-Column order matches \code{fourier_integrate_basis()}.}
-\item{\code{h}}{Pixel size used.}
-}
+Named list: Q (diagonal sparse Matrix), q_diag, modes (data frame).
 }
 \description{
-Constructs the \eqn{K \times K} diagonal precision matrix \eqn{Q} for the
-physical-unit cosine basis matched to a Matérn field.
+Diagonal entry for mode (j1, j2):
+q_k = (kappa2 + lambda_k)^2 / (sigma2_M_scale * Lx * Ly)
+where lambda_k = pi^2 * ((j1-1)^2/Lx^2 + (j2-1)^2/Ly^2).
 }
 \details{
-The cosine basis \eqn{\phi_{j_1,j_2}} is normalised so that
-\eqn{h^2 \Phi^\top \Phi = I_K} (physical L2 inner product). The diagonal
-precision entry for mode \eqn{(j_1, j_2)} is:
-\deqn{
-  Q_{j_1,j_2} =
-  \frac{(\kappa^2 + \lambda^\Delta_{j_1,j_2})^2}
-       {\sigma^2_{M,\rm scale} \cdot L_x L_y}
-}
-where \eqn{L_x = m_1 h}, \eqn{L_y = m_2 h}, and
-\eqn{\lambda^\Delta_{j_1,j_2} = \pi^2[(j_1-1)^2/L_x^2 + (j_2-1)^2/L_y^2]}.
-The \eqn{L_x L_y} factor compensates for the physical normalisation of
-\eqn{\Phi}, ensuring that the implied field variance matches the SAR prior.
+Use with fourier_freq_grid(..., norm="physical") and phi = sigma2_M/sigma2e.
+Mode ordering matches fourier_integrate_basis(): j1 varies fastest.
 
-Mode ordering matches \code{fourier_integrate_basis()} from spatintegrate:
-\eqn{j_1} and \eqn{j_2} run from 1 to \eqn{m_1} and \eqn{m_2} respectively,
-with \eqn{j = 1} giving the constant term.
+When K < m1*m2 modes are requested, the K modes with largest prior variance
+(smallest q) are retained and sorted by decreasing prior variance.
 }
 \seealso{
-\code{\link{sar_to_matern}}, \code{\link{matern_to_sar}}
+sar_to_matern, fourier_matern_Q_sb
 }

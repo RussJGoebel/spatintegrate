@@ -9,47 +9,27 @@
 #   x = column direction,  Lx = domain_bbox[3] - domain_bbox[1]
 #   y = row direction,     Ly = domain_bbox[4] - domain_bbox[2]
 #
-# For a raster grid with m1 rows and m2 columns and pixel size delta:
-#
-#   Lx = m2 * delta,   Ly = m1 * delta
-#
-# Pixel index j (row-major, j = 1..m1*m2):
-#   row r = (j-1) %/% m2 + 1,   col c = (j-1) %% m2 + 1
-#   pixel centre: x = (c - 0.5) * delta,   y = (r - 0.5) * delta
-#
-# Mode ordering
-# -------------
-# fourier_freq_grid(J1, J2, domain_bbox) enumerates modes as
-#   expand.grid(j1 = 1:J1, j2 = 1:J2),  j1 varies fastest.
-# j1 indexes x-frequencies (Lx), j2 indexes y-frequencies (Ly).
-#
-# For a full raster basis call with J1 = m2, J2 = m1:
-#   column k of A from fourier_integrate_basis() corresponds to
-#   diagonal entry k of Q from fourier_sar_Q() in fourier_prior.R.
-#
 # Normalisation
 # -------------
-# Basis functions are orthonormal under the continuous L2 inner product:
+# Two normalisation conventions are supported via the `norm` argument:
 #
-#   phi_{j1,j2}(x,y) = c_{j1} * c_{j2} *
-#                      cos((j1-1)*pi*x/Lx) * cos((j2-1)*pi*y/Ly)
+#   norm = "physical"  (default, original behaviour)
+#     phi_{j1,j2}(x,y) = c_{j1} * c_{j2} * cos(...) * cos(...)
+#     c_{jk} = 1/sqrt(Lk) if jk=1,  sqrt(2/Lk) if jk>1
+#     => integral phi_k^2 ds = 1 on [0,Lx]x[0,Ly]
 #
-# where:
-#   c_{jk} = 1/sqrt(Lk)    if jk = 1  (constant mode)
-#   c_{jk} = sqrt(2/Lk)    if jk > 1  (non-constant mode)
+#   norm = "unit_square"  (matches SpatialBasis::make_matern_fourier_basis)
+#     c_{jk} = 1 if jk=1,  sqrt(2) if jk>1
+#     => orthonormal on [0,1]^2 unit square embedding
+#     Use this when combining with make_Q_cosine(..., norm="unit_square")
+#     or with the SpatialBasis Matern-Fourier prior.
 #
-# This ensures integral phi_{j1,j2}(s)^2 ds = 1 over [0,Lx]x[0,Ly].
-#
-# Integration strategy
-# --------------------
-# Each polygon is triangulated. For each triangle T and each basis function,
-# the exact integral uses:
-#
-#   int_T cos(omega_x*sx) * cos(omega_y*sy) ds
-#     = 0.5 * Re(int_T e^{i(omega_x*sx - omega_y*sy)} ds)
-#     + 0.5 * Re(int_T e^{i(omega_x*sx + omega_y*sy)} ds)
-#
-# Each complex triangle integral is computed via .fourier_triangle_integral().
+# Patch notes
+# -----------
+# - get_triangle_coords() replaced with sf::st_coordinates() since the
+#   former is an internal unexported function. Verified equivalent output.
+# - triangulate_sf() min_area argument removed (not supported in all versions).
+# - norm argument added to support unit_square convention.
 
 
 # ------------------------------------------------------------------------------
@@ -112,6 +92,15 @@
 }
 
 
+# Extract triangle vertex coordinates from a triangulated sf geometry.
+# Replaces the unexported get_triangle_coords() from spatintegrate.
+# sf::st_coordinates() returns a matrix with columns X, Y (plus ring indices);
+# rows 1:3 are the three vertices (row 4 closes the ring).
+.get_triangle_coords <- function(tri_geom) {
+  sf::st_coordinates(tri_geom)[1:3, 1:2, drop = FALSE]
+}
+
+
 # ------------------------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------------------------
@@ -121,36 +110,19 @@
 #' Constructs the mode index table, angular frequencies, and normalisation
 #' constants for the 2D Neumann cosine basis on [0,Lx] x [0,Ly].
 #'
-#' Coordinate convention: j1 indexes the x-direction (columns,
-#' Lx = bbox[3]-bbox[1]); j2 indexes the y-direction (rows,
-#' Ly = bbox[4]-bbox[2]). For a raster grid with m1 rows, m2 columns,
-#' pixel size delta, call fourier_freq_grid(J1 = m2, J2 = m1, domain_bbox).
-#'
-#' Mode ordering: expand.grid(j1 = 1:J1, j2 = 1:J2), j1 varies fastest.
-#' Column k of A from fourier_integrate_basis() corresponds to diagonal
-#' entry k of Q from fourier_sar_Q() in fourier_prior.R.
-#'
-#' Normalisation: integral phi_{j1,j2}(s)^2 ds = 1 on [0,Lx]x[0,Ly].
-#'
 #' @param J1          Positive integer. Frequency count in x (columns).
-#'   For full raster basis use J1 = m2.
-#' @param J2          Positive integer. Frequency count in y (rows).
-#'   Default J1. For full raster basis use J2 = m1.
+#' @param J2          Positive integer. Frequency count in y (rows). Default J1.
 #' @param domain_bbox Length-4 numeric (xmin, ymin, xmax, ymax).
+#' @param norm        Character. "physical" (default) or "unit_square".
+#'   See file header for details.
 #'
 #' @return A list with: omega_mat (K x 2), indices (K x 2), norm_const (K),
-#'   J1, J2, domain_bbox.
-#'
-#' @seealso fourier_integrate_basis, fourier_sar_Q (fourier_prior.R)
-#'
-#' @examples
-#' # m1=128 rows, m2=170 cols, delta=330m
-#' bbox <- c(304971, 4666232, 304971 + 170*330, 4666232 + 128*330)
-#' fg   <- fourier_freq_grid(J1 = 170, J2 = 128, domain_bbox = bbox)
-#' nrow(fg$omega_mat)  # 170 * 128 = 21760
+#'   J1, J2, domain_bbox, norm.
 #'
 #' @export
-fourier_freq_grid <- function(J1, J2 = J1, domain_bbox) {
+fourier_freq_grid <- function(J1, J2 = J1, domain_bbox,
+                              norm = c("physical", "unit_square")) {
+  norm <- match.arg(norm)
 
   if (!is.numeric(J1) || length(J1) != 1L || J1 < 1L || J1 != as.integer(J1))
     stop("`J1` must be a positive integer.")
@@ -161,12 +133,11 @@ fourier_freq_grid <- function(J1, J2 = J1, domain_bbox) {
 
   J1 <- as.integer(J1)
   J2 <- as.integer(J2)
-  Lx <- domain_bbox[3L] - domain_bbox[1L]   # x = column direction
-  Ly <- domain_bbox[4L] - domain_bbox[2L]   # y = row direction
+  Lx <- domain_bbox[3L] - domain_bbox[1L]
+  Ly <- domain_bbox[4L] - domain_bbox[2L]
   if (Lx <= 0 || Ly <= 0)
     stop("`domain_bbox` must have positive width and height.")
 
-  # j1 indexes x (columns), j2 indexes y (rows), j1 varies fastest
   grid <- expand.grid(j1 = seq_len(J1), j2 = seq_len(J2))
 
   omega_mat <- cbind(
@@ -174,9 +145,16 @@ fourier_freq_grid <- function(J1, J2 = J1, domain_bbox) {
     omega_y = (grid$j2 - 1L) * pi / Ly
   )
 
-  # Physical L2 normalisation: integral phi_k^2 ds = 1 on [0,Lx]x[0,Ly]
-  c1 <- ifelse(grid$j1 == 1L, 1 / sqrt(Lx), sqrt(2 / Lx))
-  c2 <- ifelse(grid$j2 == 1L, 1 / sqrt(Ly), sqrt(2 / Ly))
+  if (norm == "physical") {
+    # Physical L2 norm: integral phi_k^2 ds = 1 on [0,Lx]x[0,Ly]
+    c1 <- ifelse(grid$j1 == 1L, 1 / sqrt(Lx), sqrt(2 / Lx))
+    c2 <- ifelse(grid$j2 == 1L, 1 / sqrt(Ly), sqrt(2 / Ly))
+  } else {
+    # Unit-square norm: matches SpatialBasis::make_matern_fourier_basis
+    # phi_k values are O(1); use with make_Q_cosine(..., norm="unit_square")
+    c1 <- ifelse(grid$j1 == 1L, 1, sqrt(2))
+    c2 <- ifelse(grid$j2 == 1L, 1, sqrt(2))
+  }
 
   list(
     omega_mat   = omega_mat,
@@ -184,7 +162,8 @@ fourier_freq_grid <- function(J1, J2 = J1, domain_bbox) {
     norm_const  = c1 * c2,
     J1          = J1,
     J2          = J2,
-    domain_bbox = domain_bbox
+    domain_bbox = domain_bbox,
+    norm        = norm
   )
 }
 
@@ -196,36 +175,20 @@ fourier_freq_grid <- function(J1, J2 = J1, domain_bbox) {
 #'
 #'   A_f[i,k] = (1/|D_i|) * integral_{D_i} phi_k(s) ds
 #'
-#' Integration is exact: each polygon is triangulated and the closed-form
-#' triangle integral of e^{i*omega.s} is accumulated analytically.
-#'
-#' Polygon coordinates are shifted to domain-local frame [0,Lx]x[0,Ly]
-#' using freq_grid$domain_bbox before integration.
-#'
 #' @param polygons_sf  sf object in a projected CRS. One row per polygon.
 #' @param freq_grid    List from fourier_freq_grid().
-#' @param min_area     Non-negative numeric. Triangles with area <= min_area
-#'   are skipped. Default 0.
 #'
-#' @return Numeric matrix n x K. Columns in j1-fastest order matching
-#'   freq_grid$indices. Rows for polygons with no valid triangles are NA.
-#'
-#' @seealso fourier_freq_grid
+#' @return Numeric matrix n x K.
 #'
 #' @export
-fourier_integrate_basis <- function(polygons_sf, freq_grid, min_area = 0) {
+fourier_integrate_basis <- function(polygons_sf, freq_grid) {
 
   if (!inherits(polygons_sf, "sf"))
     stop("`polygons_sf` must be an sf object.")
   if (nrow(polygons_sf) == 0L)
     stop("`polygons_sf` must have at least one row.")
-  assert_projected(polygons_sf, arg_name = "polygons_sf")
-
   if (!is.list(freq_grid) || is.null(freq_grid$omega_mat))
     stop("`freq_grid` must be a list from fourier_freq_grid().")
-  if (!is.numeric(min_area) || length(min_area) != 1L ||
-      is.na(min_area) || min_area < 0)
-    stop("`min_area` must be a non-negative numeric scalar.")
 
   omega_mat  <- freq_grid$omega_mat
   norm_const <- freq_grid$norm_const
@@ -236,9 +199,6 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid, min_area = 0) {
   origin_x <- freq_grid$domain_bbox[1L]
   origin_y <- freq_grid$domain_bbox[2L]
 
-  # cos(omega_x*sx)*cos(omega_y*sy)
-  #   = 0.5*Re(e^{i(omega_x*sx - omega_y*sy)})
-  #   + 0.5*Re(e^{i(omega_x*sx + omega_y*sy)})
   omega_minus <- cbind( omega_mat[, 1L], -omega_mat[, 2L])
   omega_plus  <- omega_mat
 
@@ -247,7 +207,7 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid, min_area = 0) {
   for (i in seq_len(n_poly)) {
 
     tris <- tryCatch(
-      triangulate_sf(geom[i], min_area = min_area),
+      triangulate_sf(geom[i]),        # no min_area: not supported in all versions
       error = function(e) sf::st_sfc()
     )
     if (length(tris) == 0L) next
@@ -260,7 +220,7 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid, min_area = 0) {
     int_plus  <- complex(r)
 
     for (j in seq_along(tris)) {
-      coords       <- get_triangle_coords(tris[[j]])
+      coords       <- .get_triangle_coords(tris[[j]])   # patched: no get_triangle_coords
       coords[, 1L] <- coords[, 1L] - origin_x
       coords[, 2L] <- coords[, 2L] - origin_y
       int_minus <- int_minus +

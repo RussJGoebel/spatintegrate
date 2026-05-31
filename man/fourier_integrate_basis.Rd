@@ -4,19 +4,15 @@
 \alias{fourier_integrate_basis}
 \title{Exact Cosine Basis Integration Over Polygons}
 \usage{
-fourier_integrate_basis(polygons_sf, freq_grid, min_area = 0)
+fourier_integrate_basis(polygons_sf, freq_grid)
 }
 \arguments{
 \item{polygons_sf}{sf object in a projected CRS. One row per polygon.}
 
 \item{freq_grid}{List from fourier_freq_grid().}
-
-\item{min_area}{Non-negative numeric. Triangles with area <= min_area
-are skipped. Default 0.}
 }
 \value{
-Numeric matrix n x K. Columns in j1-fastest order matching
-freq_grid$indices. Rows for polygons with no valid triangles are NA.
+Numeric matrix n x K.
 }
 \description{
 Computes the n x K design matrix A_f where entry (i,k) is the
@@ -24,13 +20,4 @@ area-normalised integral of basis function k over polygon i:
 }
 \details{
 A_f\link{i,k} = (1/|D_i|) * integral_{D_i} phi_k(s) ds
-
-Integration is exact: each polygon is triangulated and the closed-form
-triangle integral of e^{i*omega.s} is accumulated analytically.
-
-Polygon coordinates are shifted to domain-local frame \link{0,Lx}x\link{0,Ly}
-using freq_grid$domain_bbox before integration.
-}
-\seealso{
-fourier_freq_grid
 }

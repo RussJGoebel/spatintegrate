@@ -2,34 +2,23 @@
 % Please edit documentation in R/fourier_prior.R
 \name{fourier_matern_Q}
 \alias{fourier_matern_Q}
-\title{Build Matern-Fourier Prior Precision Matrix}
+\title{Build Matern-Fourier prior precision matrix (physical normalisation)}
 \usage{
-fourier_matern_Q(freq_grid, range, delta)
+fourier_matern_Q(freq_grid, kappa2, delta, alpha = 2L)
 }
 \arguments{
 \item{freq_grid}{List from fourier_freq_grid().}
 
-\item{range}{Positive numeric. Matern range (CRS units).}
+\item{kappa2}{kappa^2 in physical CRS units (1/m^2).}
 
 \item{delta}{Positive numeric. Pixel size in CRS units.}
+
+\item{alpha}{Smoothness integer (default 2).}
 }
 \value{
-A diagonal sparse Matrix of class ddiMatrix, dimension K x K.
+Named list: Q (diagonal sparse Matrix), q_diag (numeric vector).
 }
 \description{
-Constructs the diagonal prior precision matrix Q_f for the Fourier basis
-under a Matern(nu=1) prior. Uses the continuous spectral eigenvalues.
-}
-\details{
-The diagonal entries are:
-
-Q_f\link{k} = n_cells * (kappa^2 + omega_sq\link{k})^2
-
-where n_cells = (Lx/delta)*(Ly/delta) and kappa^2 = 8/range^2.
-
-Use with phi = phi_M where phi_M = sigma2_M / sigma2e.
-To convert from a SAR fit: phi_M = sar_phi_to_fourier_phi(phi_sar, rho, delta).
-}
-\seealso{
-fourier_sar_Q, sar_phi_to_fourier_phi
+q_k = n_cells * (kappa2 + omega_sq_k)^alpha
+Use with phi = sigma2_M / sigma2e.
 }

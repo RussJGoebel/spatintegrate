@@ -2,36 +2,22 @@
 % Please edit documentation in R/fourier_prior.R
 \name{sar_phi_to_fourier_phi}
 \alias{sar_phi_to_fourier_phi}
-\title{Convert SAR phi to Fourier phi}
+\title{Convert SAR phi to Fourier phi (physical units)}
 \usage{
 sar_phi_to_fourier_phi(phi_sar, rho, delta, freq_grid)
 }
 \arguments{
 \item{phi_sar}{Positive numeric. phi from SAR CV fit.}
 
-\item{rho}{Numeric in (0,1). SAR spatial autoregression parameter.}
+\item{rho}{Numeric in (0,1).}
 
 \item{delta}{Positive numeric. Pixel size in CRS units.}
+
+\item{freq_grid}{List from fourier_freq_grid().}
 }
 \value{
 Positive numeric. phi for the Fourier model.
 }
 \description{
-Converts the signal-to-noise ratio phi from a SAR model to the equivalent
-phi for the matched Fourier-Matern model. The conversion uses the
-SAR-to-Matern amplitude relationship:
-}
-\details{
-sigma2_M = sigma2_SAR * (4 / (rho * delta^2))^2
-
-Since phi = sigma2b / sigma2e and sigma2e cancels, this gives:
-
-phi_fourier = phi_sar * 16 * (Lx * Ly) / (rho^2 * delta^2)
-}
-\examples{
-phi_fourier <- sar_phi_to_fourier_phi(phi_sar=185, rho=0.95, delta=330, freq_grid=fg)
-
-}
-\seealso{
-fourier_sar_Q
+phi_fourier = phi_sar * 16 * Lx * Ly / (rho^2 * delta^2)
 }

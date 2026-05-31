@@ -4,44 +4,28 @@
 \alias{fourier_freq_grid}
 \title{Build a Neumann Cosine Frequency Grid}
 \usage{
-fourier_freq_grid(J1, J2 = J1, domain_bbox)
+fourier_freq_grid(
+  J1,
+  J2 = J1,
+  domain_bbox,
+  norm = c("physical", "unit_square")
+)
 }
 \arguments{
-\item{J1}{Positive integer. Frequency count in x (columns).
-For full raster basis use J1 = m2.}
+\item{J1}{Positive integer. Frequency count in x (columns).}
 
-\item{J2}{Positive integer. Frequency count in y (rows).
-Default J1. For full raster basis use J2 = m1.}
+\item{J2}{Positive integer. Frequency count in y (rows). Default J1.}
 
 \item{domain_bbox}{Length-4 numeric (xmin, ymin, xmax, ymax).}
+
+\item{norm}{Character. "physical" (default) or "unit_square".
+See file header for details.}
 }
 \value{
 A list with: omega_mat (K x 2), indices (K x 2), norm_const (K),
-J1, J2, domain_bbox.
+J1, J2, domain_bbox, norm.
 }
 \description{
 Constructs the mode index table, angular frequencies, and normalisation
 constants for the 2D Neumann cosine basis on \link{0,Lx} x \link{0,Ly}.
-}
-\details{
-Coordinate convention: j1 indexes the x-direction (columns,
-Lx = bbox\link{3}-bbox\link{1}); j2 indexes the y-direction (rows,
-Ly = bbox\link{4}-bbox\link{2}). For a raster grid with m1 rows, m2 columns,
-pixel size delta, call fourier_freq_grid(J1 = m2, J2 = m1, domain_bbox).
-
-Mode ordering: expand.grid(j1 = 1:J1, j2 = 1:J2), j1 varies fastest.
-Column k of A from fourier_integrate_basis() corresponds to diagonal
-entry k of Q from fourier_sar_Q() in fourier_prior.R.
-
-Normalisation: integral phi_{j1,j2}(s)^2 ds = 1 on \link{0,Lx}x\link{0,Ly}.
-}
-\examples{
-# m1=128 rows, m2=170 cols, delta=330m
-bbox <- c(304971, 4666232, 304971 + 170*330, 4666232 + 128*330)
-fg   <- fourier_freq_grid(J1 = 170, J2 = 128, domain_bbox = bbox)
-nrow(fg$omega_mat)  # 170 * 128 = 21760
-
-}
-\seealso{
-fourier_integrate_basis, fourier_sar_Q (fourier_prior.R)
 }

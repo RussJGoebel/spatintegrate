@@ -2,49 +2,25 @@
 % Please edit documentation in R/fourier_prior.R
 \name{fourier_sar_Q}
 \alias{fourier_sar_Q}
-\title{Build Matched SAR-Fourier Prior Precision Matrix}
+\title{Build matched SAR-Fourier prior precision matrix (physical normalisation)}
 \usage{
 fourier_sar_Q(freq_grid, rho, delta)
 }
 \arguments{
-\item{freq_grid}{List from fourier_freq_grid(J1=m2, J2=m1, domain_bbox).}
+\item{freq_grid}{List from fourier_freq_grid().}
 
-\item{rho}{Numeric in (0,1). SAR spatial autoregression parameter.}
+\item{rho}{Numeric in (0,1).}
 
 \item{delta}{Positive numeric. Pixel size in CRS units.}
 }
 \value{
-A diagonal sparse Matrix of class ddiMatrix, dimension K x K.
+Named list: Q (diagonal sparse Matrix), q_diag (numeric vector).
 }
 \description{
-Constructs the diagonal prior precision matrix Q_f for the Fourier basis
-matched to a SAR(rook) prior. Uses the exact discrete Laplacian eigenvalues
-rather than the continuous Matern approximation, giving exact spectral
-matching at all frequencies.
+Uses exact discrete Laplacian eigenvalues. Use with norm="physical" freq_grid
+and phi = sar_phi_to_fourier_phi(phi_sar, rho, delta, freq_grid).
 }
 \details{
-The diagonal entries are:
-
-Q_f\link{k} = n_cells * (1 - rho * lambda_W\link{k})^2
-
-where:
-n_cells    = (Lx/delta) * (Ly/delta)  =  m1 * m2
+q_k = (1 - rho * lambda_W\link{k})^2
 lambda_W\link{k} = 0.5 * (cos(omega_x\link{k}*delta) + cos(omega_y\link{k}*delta))
-
-lambda_W\link{k} is the exact eigenvalue of the row-normalised rook weight
-matrix W at the continuous frequency (omega_x\link{k}, omega_y\link{k}).
-
-Use with phi = sar_phi_to_fourier_phi(phi_sar, rho, delta).
-}
-\examples{
-bbox <- c(0, 0, 170*330, 128*330)
-fg   <- fourier_freq_grid(J1=170, J2=128, domain_bbox=bbox)
-Q_f  <- fourier_sar_Q(fg, rho=0.95, delta=330)
-# phi_f <- sar_phi_to_fourier_phi(phi_sar, rho=0.95, delta=330, freq_grid=fg)
-# fit   <- fit_fastblm(y, A_f, Q_f, phi=phi_f, solver="woodbury",
-#                      Q_inv=function(v) v/diag(Q_f))
-
-}
-\seealso{
-sar_phi_to_fourier_phi, fourier_freq_grid
 }
