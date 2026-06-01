@@ -4,12 +4,17 @@
 \alias{fourier_integrate_basis}
 \title{Exact Cosine Basis Integration Over Polygons}
 \usage{
-fourier_integrate_basis(polygons_sf, freq_grid)
+fourier_integrate_basis(polygons_sf, freq_grid, parallel = FALSE)
 }
 \arguments{
 \item{polygons_sf}{sf object in a projected CRS. One row per polygon.}
 
 \item{freq_grid}{List from fourier_freq_grid().}
+
+\item{parallel}{Logical. If \code{TRUE}, parallelises over polygons using
+the current \code{future::plan()}. Set a plan before calling, e.g.
+\code{future::plan(future::multisession, workers = 4)}. Default
+\code{FALSE}.}
 }
 \value{
 Numeric matrix n x K.

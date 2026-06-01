@@ -30,6 +30,8 @@
 #   former is an internal unexported function. Verified equivalent output.
 # - triangulate_sf() min_area argument removed (not supported in all versions).
 # - norm argument added to support unit_square convention.
+# - parallel argument added; parallelises over polygons via future.apply,
+#   matching the pattern used in compute_overlap_fractions.
 
 
 # ------------------------------------------------------------------------------
@@ -177,11 +179,15 @@ fourier_freq_grid <- function(J1, J2 = J1, domain_bbox,
 #'
 #' @param polygons_sf  sf object in a projected CRS. One row per polygon.
 #' @param freq_grid    List from fourier_freq_grid().
+#' @param parallel     Logical. If \code{TRUE}, parallelises over polygons using
+#'   the current \code{future::plan()}. Set a plan before calling, e.g.
+#'   \code{future::plan(future::multisession, workers = 4)}. Default
+#'   \code{FALSE}.
 #'
 #' @return Numeric matrix n x K.
 #'
 #' @export
-fourier_integrate_basis <- function(polygons_sf, freq_grid) {
+fourier_integrate_basis <- function(polygons_sf, freq_grid, parallel = FALSE) {
 
   if (!inherits(polygons_sf, "sf"))
     stop("`polygons_sf` must be an sf object.")
@@ -202,25 +208,26 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid) {
   omega_minus <- cbind( omega_mat[, 1L], -omega_mat[, 2L])
   omega_plus  <- omega_mat
 
-  A <- matrix(NA_real_, nrow = n_poly, ncol = r)
+  # --- Per-polygon worker -----------------------------------------------------
 
-  for (i in seq_len(n_poly)) {
+  worker <- function(i) {
+    row <- rep(NA_real_, r)
 
     tris <- tryCatch(
       triangulate_sf(geom[i]),        # no min_area: not supported in all versions
       error = function(e) sf::st_sfc()
     )
-    if (length(tris) == 0L) next
+    if (length(tris) == 0L) return(row)
 
     areas      <- as.numeric(sf::st_area(tris))
     total_area <- sum(areas)
-    if (total_area == 0) next
+    if (total_area == 0) return(row)
 
     int_minus <- complex(r)
     int_plus  <- complex(r)
 
     for (j in seq_along(tris)) {
-      coords       <- .get_triangle_coords(tris[[j]])   # patched: no get_triangle_coords
+      coords       <- .get_triangle_coords(tris[[j]])
       coords[, 1L] <- coords[, 1L] - origin_x
       coords[, 2L] <- coords[, 2L] - origin_y
       int_minus <- int_minus +
@@ -229,8 +236,38 @@ fourier_integrate_basis <- function(polygons_sf, freq_grid) {
         .fourier_triangle_integral(coords, omega_plus,  areas[j])
     }
 
-    A[i, ] <- norm_const * 0.5 * (Re(int_minus) + Re(int_plus)) / total_area
+    norm_const * 0.5 * (Re(int_minus) + Re(int_plus)) / total_area
   }
+
+  # --- Parallelise or run sequentially ----------------------------------------
+
+  if (parallel) {
+    rows <- future.apply::future_lapply(
+      seq_len(n_poly),
+      worker,
+      future.globals = list(
+        worker        = worker,
+        geom          = geom,
+        r             = r,
+        omega_minus   = omega_minus,
+        omega_plus    = omega_plus,
+        norm_const    = norm_const,
+        origin_x      = origin_x,
+        origin_y      = origin_y,
+        .sinc_e                    = .sinc_e,
+        .fourier_triangle_integral = .fourier_triangle_integral,
+        .get_triangle_coords       = .get_triangle_coords
+      ),
+      future.packages = "sf",
+      future.seed     = TRUE
+    )
+  } else {
+    rows <- lapply(seq_len(n_poly), worker)
+  }
+
+  # --- Assemble and return ----------------------------------------------------
+
+  A <- matrix(unlist(rows, use.names = FALSE), nrow = n_poly, ncol = r, byrow = TRUE)
 
   colnames(A) <- paste0("phi_", freq_grid$indices[, 1L], "_",
                         freq_grid$indices[, 2L])
